@@ -83,7 +83,19 @@ cd aws-eks           # or gcp-gke, or single-node-k3s
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
 ```
 
-Work through it **with** them. Confirm the chart version against their
+**Agree `cluster_name` with them before you write it.** Do not invent one, and
+do not reach for something like `marshal-test`: it is the name of real
+infrastructure in their account, it is stamped into node groups, IAM roles,
+security groups and the database's final snapshot, and changing it later means
+replacing all of them. Ask what their naming convention is. If this really is a
+throwaway, have them say so, because that changes the RDS answers in step 3
+too.
+
+`chart_version` comes from their onboarding, not from the example file. The
+example carries the version this installer was published for, which is a
+reasonable default but not an instruction.
+
+Work through the rest **with** them. Confirm the chart version against their
 onboarding rather than the example's placeholder. Their `terraform.tfvars` and
 their state belong in their own repository and their own backend: both contain
 their licence token, registry token and database password. Never paste either
