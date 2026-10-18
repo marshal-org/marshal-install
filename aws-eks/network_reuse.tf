@@ -48,3 +48,12 @@ resource "aws_ec2_tag" "reused_subnet" {
   key         = each.value.key
   value       = each.value.value
 }
+
+# The CIDR of a VPC you brought. Needed because the installer opens the
+# Kubernetes API endpoint to the VPC's own range by default (see
+# cluster_private_access.tf); on the created path that value is var.vpc_cidr,
+# but on this path only AWS knows it.
+data "aws_vpc" "reused" {
+  count = local.provision && !var.create_network ? 1 : 0
+  id    = var.vpc_id
+}

@@ -142,10 +142,64 @@ variable "service_ipv4_cidr" {
   default     = "172.20.0.0/16"
 }
 
-variable "create_bastion" {
-  description = "Provision a small, no-public-IP bastion EC2 instance reachable only via AWS Systems Manager Session Manager (no open inbound ports at all, no SSH key management — the AWS-native equivalent of gcp-gke's IAP-tunneled bastion). Needed to reach a private-only cluster (cluster_endpoint_public_access=false, the default): run terraform/kubectl/helm FROM the bastion, same pattern as the GCP customer installs. true (default) whenever provisioning; set false if you already have VPN/peering/Direct Connect into this VPC instead."
+variable "cluster_private_access_cidrs" {
+  description = <<-EOT
+    Which address ranges may reach the private Kubernetes API endpoint on 443.
+
+    EMPTY (default) means the VPC's own CIDR, which is what lets you run the whole
+    install as one apply from anywhere that can already route into the VPC: a VPN, a
+    Twingate or Tailscale connector, a jump host. Without it the apply creates every
+    AWS resource and then fails on the first Kubernetes resource with an i/o timeout,
+    because the EKS cluster security group admits only the nodes.
+
+    This is not the same as a public endpoint. The endpoint has no public address
+    unless you ask for one, and reaching it still needs an AWS identity with an EKS
+    access entry and Kubernetes RBAC. Set this to narrow which ranges can connect,
+    and include whatever range your tunnel presents.
+  EOT
+  type        = list(string)
+  default     = []
+}
+
+variable "bastion_install_permissions" {
+  description = <<-EOT
+    What the bastion's IAM role may do. Only read when create_bastion = true.
+
+    TRUE (default). AdministratorAccess, because the bastion runs the whole install:
+    it creates the cluster, the IAM roles, the OIDC provider, the EKS addons and the
+    database, and none of that is possible with a read-only role. Delete the bastion
+    when the install is finished and the permission goes with it.
+
+    FALSE. ReadOnlyAccess plus narrow grants for the state bucket, the OIDC thumbprint
+    and ACM. Enough to finish the Kubernetes half of an install whose AWS half was
+    already applied from another machine. Choose this only if your policy forbids an
+    administrative instance, and expect to run the AWS half yourself.
+  EOT
   type        = bool
   default     = true
+}
+
+variable "create_bastion" {
+  description = <<-EOT
+    Provision a small bastion EC2 instance to reach the private cluster endpoint from: no
+    public IP, no inbound ports, reached only through AWS Systems Manager, so there is no SSH
+    key to manage.
+
+    FALSE (default). Most organisations running a private EKS cluster already reach their VPC
+    through a VPN, Twingate, Tailscale, Direct Connect or an existing jump host. With any of
+    those, install from wherever you normally work and every later upgrade is one command from
+    the same place. A bastion you do not need is another host inside your VPC holding
+    cluster-admin, which is a cost rather than a convenience.
+
+    Set true only if you have NO path into the VPC. Then the bastion becomes the machine you
+    install from, start to finish: see https://docs.marshal.codes/installing/eks
+
+    Your access has to RESOLVE the endpoint, not just route to it. Its DNS is in a Route53
+    private hosted zone on the VPC, so a tunnel that forwards packets but keeps your laptop's
+    DNS cannot resolve the hostname. Check with `kubectl get nodes` before install day.
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "bastion_instance_type" {

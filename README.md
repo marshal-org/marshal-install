@@ -86,7 +86,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.22.0-r3 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.23.0 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -102,12 +102,22 @@ It is gitignored, so it survives every version switch:
 ```hcl
 terraform {
   backend "s3" {
-    bucket = "acme-terraform-state"
-    key    = "marshal/terraform.tfstate"
-    region = "eu-west-1"
+    bucket       = "acme-eks-tfstate"   # the name must contain "tfstate", see below
+    key          = "marshal/terraform.tfstate"
+    region       = "eu-west-1"
+    encrypt      = true
+    use_lockfile = true                     # needs Terraform >= 1.10
   }
 }
 ```
+
+**On AWS this is required, not optional, if you use the bastion.** The install
+runs in two phases, the second from inside your network, and the two phases
+only share what they created through remote state. The bastion's IAM role is
+deliberately narrow: it can reach S3 buckets whose **name contains
+`tfstate`** and nothing else, so a bucket called `acme-terraform-state`
+will fail with AccessDenied from the bastion while working fine from your
+laptop.
 
 Prefer to keep your variables in your own repository instead of in this clone?
 Point Terraform at them: `terraform apply -var-file=/path/to/your/prod.tfvars`.
@@ -151,4 +161,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.22.0`, published as `v0.22.0-r3`.
+Generated for Marshal chart version `0.23.0`, published as `v0.23.0`.

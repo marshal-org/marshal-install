@@ -44,6 +44,25 @@ dedicated VPC, or one they already run?
 | New cluster, dedicated network | `deploy_cluster = true` |
 | New cluster, their network | `deploy_cluster = true` and `create_network = false` |
 
+**How will they reach the cluster?** Only when the installer creates it, because
+the endpoint is private by default. This changes nothing in AWS. It decides which
+machine you run the install from, and there is a path that needs only one.
+
+| Their situation | Set | The install |
+|---|---|---|
+| A route into the VPC already: Twingate, Tailscale, Direct Connect, a transit gateway, a jump host | nothing | One `terraform apply` from their own machine |
+| No route in | `cluster_endpoint_public_access = true` and `cluster_endpoint_public_access_cidrs` holding their own address | One `terraform apply`, then set it back to private and apply once more |
+| Policy forbids a public endpoint, even briefly | `create_bastion = true` | The **whole** install runs on the bastion |
+
+Prefer the first, then the second. Both run on one machine, in one pass, with no
+files moved between hosts.
+
+The endpoint hostname resolves in public DNS even while the cluster is private.
+It answers with addresses inside the VPC, so a tunnel has to carry **routing to
+the private subnets**, not DNS. In Twingate or Tailscale that means the connector
+or subnet router runs inside the VPC and advertises that CIDR. A tunnel that only
+forwards the hostname will still fail.
+
 If they are reusing a cluster, three things must already be in place and each
 fails **silently** if missing: the AWS Load Balancer Controller (or an ingress
 controller on GKE), the EBS CSI driver on EKS, and a reachable Postgres 16.
@@ -113,14 +132,43 @@ The plan stops early on a bad input rather than failing twenty minutes in. If a
 precondition fires, the message says what to change; it is a real requirement,
 not a warning to route around.
 
-**When the cluster endpoint is private**, which is the default on the
-provisioning path, the second half of the apply has to run from inside the
-network. The installer creates a bastion with no public IP and no inbound
-ports, reached through AWS Systems Manager. The two-phase sequence is on
-https://docs.marshal.codes/installing/eks under "Installing when the endpoint
-is private". Offer the alternatives too: their existing VPN or jump host with
-`create_bastion = false`, or a public endpoint locked to their own address
-ranges, which is simplest and the weakest of the three.
+One apply does the whole install: the AWS resources and the Kubernetes ones, in
+dependency order. Do not split it, and **never narrow it with `-target`**.
+`-target` pulls in a resource's dependencies but not its dependents, so
+targeting one resource quietly skips the policy attachments that hang off it.
+
+**Put the state in S3 before the first apply.** It is their state either way, but
+a bucket survives a lost laptop, and it is the only way a second person can run
+the next upgrade. Terraform cannot create its own backend, so the bucket is made
+first, by hand:
+
+```bash
+aws s3api create-bucket --bucket <name>-tfstate --region <region> \
+  --create-bucket-configuration LocationConstraint=<region>
+aws s3api put-bucket-versioning --bucket <name>-tfstate \
+  --versioning-configuration Status=Enabled
+aws s3api put-public-access-block --bucket <name>-tfstate \
+  --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+```
+
+Name it so it contains `tfstate`. The bastion's IAM role grants S3 only on
+`arn:aws:s3:::*tfstate*`, so another name works from their machine and fails on
+the bastion, which is a confusing way to find out. Then add `backend_override.tf`
+(gitignored, so it survives a version switch) and `terraform init
+-migrate-state`. The state holds their licence token, registry token and
+database password, so versioning, encryption and a public access block are not
+optional.
+
+**If the apply reaches the Kubernetes resources and cannot connect**, the machine
+has no route to the private endpoint. The AWS half is already created and in the
+state, so nothing is lost and nothing needs recreating. Get a route, or set
+`cluster_endpoint_public_access = true` with their own address, and run the same
+`terraform apply` again. It carries on from where it stopped.
+
+On the bastion path, the bastion runs the whole install, so give it the
+credentials for that job and delete it when the install is done. Do not run half
+the install on one machine and half on another: the two share nothing but the
+state, and the hand-off is where installs go wrong.
 
 ## 5. Verify, and hand over
 
@@ -134,6 +182,38 @@ Expect every pod `Running` and a line reporting the licence state as
 `LICENSED`. Then point them at their hostname. The certificate is a self-signed
 placeholder until they supply a real one, so a browser warning at this stage is
 expected, not a fault: see the TLS section of their cloud's page.
+
+## 6. Tearing one down
+
+`terraform destroy` is not the whole job, and the order matters.
+
+```bash
+# 1. in terraform.tfvars, then apply: an in-place RDS change, fast
+rds_deletion_protection = false
+terraform apply
+terraform destroy
+```
+
+Flipping protection **after** starting the destroy does not work. The destroy
+tears down the cluster first and only then fails on the database, leaving a
+database with nothing around it.
+
+Two things outlive the destroy, because Terraform never owned them:
+
+- **The final RDS snapshot**, `<cluster_name>-postgres-final`. Keep it if the
+  data matters. It also blocks a rebuild under the same cluster name, since the
+  snapshot name would collide.
+- **EBS volumes from Kubernetes PersistentVolumeClaims.** The EBS CSI driver
+  created them, not Terraform, so they survive as unattached volumes and keep
+  billing. Find them by tag:
+
+```bash
+aws ec2 describe-volumes --region <region> \
+  --filters Name=tag:KubernetesCluster,Values=<cluster_name> \
+  --query 'Volumes[].VolumeId' --output text
+```
+
+Delete the namespace before the destroy and the CSI driver removes them for you.
 
 ## When something fails
 

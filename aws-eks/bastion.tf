@@ -4,7 +4,8 @@
 # public IP and no open inbound ports at all — reachable only via AWS Systems
 # Manager Session Manager (outbound-initiated, IAM-authenticated), the
 # AWS-native equivalent of gcp-gke's IAP-tunneled bastion. Gated on
-# deploy_cluster=true && create_bastion (default true when provisioning).
+# deploy_cluster=true && create_bastion (default FALSE: only when there is no
+# other path into the VPC, and then it is the machine you install FROM).
 #
 # Apply workflow once this exists: ship a `deploy` checkout to the bastion
 # (e.g. via S3 — the bastion has NAT egress) and run terraform ON it, the same
@@ -61,8 +62,16 @@ resource "aws_iam_role" "bastion" {
 # everything already in state, plus a scoped S3 policy for the state bucket
 # (ReadOnlyAccess excludes s3:PutObject, needed for state writes/locking).
 #
-# Deliberately NOT AdministratorAccess. First attached that broadly and hit a
-# genuinely confusing live failure: the instance stopped itself mid-apply.
+# The policy is chosen by var.bastion_install_permissions, because the two jobs
+# a bastion gets used for need different grants. When the bastion runs the WHOLE
+# install (the default, and the only sequence we document, since splitting an
+# install across two machines is where installs go wrong) it has to CREATE the
+# cluster, the IAM roles, the OIDC provider, the addons and the database, and
+# read-only cannot. When it only finishes the Kubernetes half of an install
+# started elsewhere, read-only plus the scoped policies below is enough.
+#
+# AdministratorAccess was once attached here and caused a genuinely confusing
+# live failure: the instance stopped itself mid-apply.
 # Root cause (confirmed via CloudTrail, not assumed): terraform running ON
 # the bastion detected THIS FILE's own user_data heredoc had drifted from
 # what was baked in at the bastion's actual boot (from earlier edits), and
@@ -73,16 +82,18 @@ resource "aws_iam_role" "bastion" {
 # self-inflicted, and fixed at the source via `lifecycle { ignore_changes =
 # [user_data] }` on aws_instance.bastion below (user_data is boot-time-only
 # anyway; changing it post-boot without an accompanying reboot wouldn't even
-# take effect). ReadOnlyAccess intentionally excludes ec2:StopInstances, so
-# even if that drift-detection bug recurred some other way, it fails closed
-# instead of taking the bastion down. Explicit EKS cluster-admin is separate
+# take effect). That root cause is fixed, which is what makes the broad policy
+# safe to offer again; set bastion_install_permissions = false to get the old
+# read-only role back. Explicit EKS cluster-admin is separate
 # (access_config.bootstrap_cluster_creator_admin_permissions only grants
 # admin to the IDENTITY THAT CREATED the cluster — the bastion's own role
 # gets none of that automatically and needs its own access entry, below).
 resource "aws_iam_role_policy_attachment" "bastion_readonly" {
-  count      = local.create_bastion ? 1 : 0
-  role       = aws_iam_role.bastion[0].name
-  policy_arn = "arn:aws:iam::aws:policy/ReadOnlyAccess"
+  count = local.create_bastion ? 1 : 0
+  role  = aws_iam_role.bastion[0].name
+  policy_arn = var.bastion_install_permissions ? (
+    "arn:aws:iam::aws:policy/AdministratorAccess"
+  ) : "arn:aws:iam::aws:policy/ReadOnlyAccess"
 }
 
 resource "aws_iam_role_policy" "bastion_state_bucket" {
