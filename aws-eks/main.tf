@@ -151,6 +151,11 @@ module "marshal" {
     aws_acm_certificate.requested,
     aws_acm_certificate_validation.requested,
     helm_release.aws_load_balancer_controller,
+    # Destroyed AFTER this resource, which is the point: it is the rule that
+    # lets this host reach the API at all. Without the edge, terraform removed
+    # it first and then could not delete what was left, failing the destroy
+    # with `dial tcp <endpoint>:443: i/o timeout`.
+    aws_security_group_rule.cluster_private_access,
     helm_release.harbor,
     harbor_project.cache,
   ]

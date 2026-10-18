@@ -86,6 +86,7 @@ resource "aws_eks_addon" "ebs_csi" {
 # the addon installed — an explicit default StorageClass is required.
 resource "kubernetes_storage_class" "gp3" {
   count = local.provision ? 1 : 0
+
   metadata {
     name = "gp3"
     annotations = {
@@ -100,7 +101,14 @@ resource "kubernetes_storage_class" "gp3" {
     type = "gp3"
   }
 
-  depends_on = [aws_eks_addon.ebs_csi]
+  depends_on = [
+    aws_eks_addon.ebs_csi,
+    # Destroyed AFTER this resource, which is the point: it is the rule that
+    # lets this host reach the API at all. Without the edge, terraform removed
+    # it first and then could not delete what was left, failing the destroy
+    # with `dial tcp <endpoint>:443: i/o timeout`.
+    aws_security_group_rule.cluster_private_access,
+  ]
 }
 
 # ── metrics-server (EKS-managed addon) ────────────────────────────────────────
@@ -233,5 +241,10 @@ resource "helm_release" "aws_load_balancer_controller" {
     aws_route_table_association.public,
     aws_route_table_association.private,
     aws_nat_gateway.this,
+    # Destroyed AFTER this resource, which is the point: it is the rule that
+    # lets this host reach the API at all. Without the edge, terraform removed
+    # it first and then could not delete what was left, failing the destroy
+    # with `dial tcp <endpoint>:443: i/o timeout`.
+    aws_security_group_rule.cluster_private_access,
   ]
 }

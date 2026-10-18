@@ -191,14 +191,16 @@ resource "aws_iam_role_policy" "harbor_registry_s3" {
 }
 
 resource "kubernetes_namespace" "harbor" {
-  count = local.create_harbor ? 1 : 0
+  depends_on = [aws_security_group_rule.cluster_private_access]
+  count      = local.create_harbor ? 1 : 0
   metadata {
     name = var.harbor_namespace
   }
 }
 
 resource "kubernetes_service_account" "harbor_registry" {
-  count = local.create_harbor ? 1 : 0
+  depends_on = [aws_security_group_rule.cluster_private_access]
+  count      = local.create_harbor ? 1 : 0
   metadata {
     name      = "harbor-registry"
     namespace = kubernetes_namespace.harbor[0].metadata[0].name
@@ -269,6 +271,11 @@ resource "helm_release" "harbor" {
     kubernetes_service_account.harbor_registry,
     aws_iam_role_policy.harbor_registry_s3,
     aws_eks_node_group.control_plane,
+    # Destroyed AFTER this resource, which is the point: it is the rule that
+    # lets this host reach the API at all. Without the edge, terraform removed
+    # it first and then could not delete what was left, failing the destroy
+    # with `dial tcp <endpoint>:443: i/o timeout`.
+    aws_security_group_rule.cluster_private_access,
   ]
 }
 
