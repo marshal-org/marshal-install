@@ -1,0 +1,76 @@
+# =============================================================================
+# single-node-k3s — example tfvars
+# =============================================================================
+# Copy to terraform.tfvars in the single-node-k3s/ dir and fill in. The 6 values
+# in "REQUIRED" are all a basic install needs; everything else has a default.
+#
+#   cp examples/single-node-k3s.tfvars.example single-node-k3s/terraform.tfvars
+#   cd single-node-k3s && terraform init && terraform apply
+# =============================================================================
+
+# ── REQUIRED ─────────────────────────────────────────────────────────────────
+
+# From your Marshal onboarding (deployment-manager mints these):
+installation_jwt    = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9…" # your license JWT
+deployment_id       = "dep_ab12cd"                            # also the registry username
+registry_pull_token = "mrpt_9f3c…"                            # registry pull password
+
+# The product version to install (== chart version). Current: 0.5.0 — use the
+# version from your onboarding email, or `helm show chart …` after logging in.
+chart_version = "0.5.0"
+
+# Hostname for the console + API. No real DNS? Use sslip.io against the node's
+# public IP (dashes for dots): marshal.<NODE-IP-DASHED>.sslip.io
+ingress_host = "marshal.acme.com"
+
+# ── Cluster: reuse an existing k3s node (default) ────────────────────────────
+# deploy_cluster is false by default — install onto a node you already run.
+# kubeconfig_path = "~/.kube/config"
+# kube_context    = ""
+
+# ── Datastores (default: in-cluster Postgres + Redis are provisioned for you) ─
+# On a single node both run in-cluster (Postgres on a local-path PVC; Redis is
+# ephemeral). For a durable managed Postgres instead, uncomment:
+# provision_datastores = false
+# database_url         = "postgres://marshal:PW@10.0.0.5:5432/marshal?sslmode=require"
+# redis_url            = "redis://10.0.0.6:6379"
+# postgres_storage     = "10Gi"
+
+# ── TLS (default: HTTP only — fine for an sslip.io test) ──────────────────────
+# For real TLS via cert-manager (install it first + create a ClusterIssuer):
+# ingress_annotations = { "cert-manager.io/cluster-issuer" = "letsencrypt" }
+# ingress_tls         = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]
+
+# ── Session port-previews (optional) ─────────────────────────────────────────
+# preview_domain = "preview.acme.com"
+
+# ── Webhook Relay + Slack (Auth Broker) — both optional, both default OFF ────
+# Leaving these unset doesn't error — Settings > Webhooks / Settings > Slack
+# just 404 in the UI with no other signal. Decide explicitly instead of
+# discovering the gap live. Both need outbound 443 from the node to whichever
+# host they point at (hooks.marshal.codes / auth.marshal.codes by default —
+# Marshal's hosted tier).
+# webhook_relay_enabled = true
+# auth_broker_url       = "https://auth.marshal.codes"
+
+# ── Shared pull-through image cache (recommended) ────────────────────────────
+# Point at the cache you run ONCE per customer (fronts registry.marshal.codes;
+# reused by every Marshal install — NOT provisioned here). Keeps per-session
+# tool-image pulls off our rate-limited registry:
+# image_cache_registry = "harbor.acme.internal/marshal"
+# registry_auth_mode   = "none"   # or "workloadIdentity" — how THIS node auths to the cache
+
+# ── Pre-release / local chart testing ────────────────────────────────────────
+# Point at a checked-out chart instead of the OCI registry:
+# chart = "../../marshal/infra/helm/marshal"
+
+# ── Provision a private GCE node instead of BYO (two-step) ───────────────────
+# Apply once to stand up a private k3s VM (no public IP + Cloud NAT), then fetch
+# its kubeconfig over IAP and apply again with deploy_cluster=false to install
+# (outputs print the exact commands).
+# deploy_cluster      = true
+# project_id          = "acme-prod"
+# zone                = "europe-west1-b"
+# machine_type        = "e2-standard-4"
+# admin_source_ranges = ["10.8.0.0/24"]   # your VPN/bastion CIDR for k3s API + SSH
+# create_network      = true              # or false + network/subnetwork

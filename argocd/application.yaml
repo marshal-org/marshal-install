@@ -1,0 +1,101 @@
+# =============================================================================
+# ArgoCD Application — install Marshal (umbrella chart) via GitOps.
+# =============================================================================
+# Commit this to the git repo ArgoCD watches, then `kubectl apply -f` it once (or
+# let an App-of-Apps adopt it). ArgoCD pulls the umbrella chart from the OCI
+# registry and reconciles it into the destination namespace.
+#
+# BEFORE this works you MUST (see argocd/README.md for exact commands):
+#   1. Register the OCI chart repo credential in ArgoCD (the mrpt_ pull token).
+#   2. Seed the stable, operator-owned Secrets ONCE — ArgoCD never manages them:
+#        • marshal-app-secrets  (JWT_SECRET + KMS_LOCAL_KEY)   ← the #1 gotcha
+#        • marshal-license      (key: jwt = your installation JWT)
+#        • marshal-db           (key: database-url = your Postgres DSN)
+#
+# Replace every acme.com / cache / DSN placeholder below with your values.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: marshal
+  namespace: argocd
+  # Keep child resources until the Application itself is deleted.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  source:
+    # OCI Helm registry. repoURL is the registry + chart-repo path WITHOUT the
+    # chart name and WITHOUT a leading "oci://" (ArgoCD ≥2.12 also accepts the
+    # oci:// form). `chart` is the chart name; the two join to
+    # registry.marshal.codes/marshal-charts/marshal.
+    repoURL: registry.marshal.codes/marshal-charts
+    chart: marshal
+    # Pinned chart version == product version. Day-2 upgrade = bump this + sync.
+    targetRevision: 0.5.0
+
+    helm:
+      releaseName: marshal
+      # Values inline. Alternatively keep them in a git-committed values.yaml and
+      # use a multi-source Application (see README → "Values from a git file").
+      valuesObject:
+        # ── Images: your SHARED pull-through cache (one per customer) ──────────
+        # Fronts registry.marshal.codes; reused by every Marshal install. With a
+        # cache + workloadIdentity/none, NO pull secret lands in git.
+        global:
+          registry: europe-west1-docker.pkg.dev/acme-shared/marshal-cache/marshal
+        registryAuth:
+          mode: workloadIdentity # or "none" for an open in-network cache
+
+        # ── CRITICAL: existing secrets, NEVER generated ───────────────────────
+        # ArgoCD renders + applies manifests, so Helm's `lookup` never runs. With
+        # provider: generated the chart would emit a FRESH random JWT_SECRET +
+        # KMS_LOCAL_KEY on EVERY sync — rotating them breaks all sessions (JWT) and
+        # makes every stored credential undecryptable (KMS). `existing` points at a
+        # Secret you seeded once and ArgoCD leaves alone.
+        secrets:
+          provider: existing
+          existingSecret: marshal-app-secrets # keys: JWT_SECRET + KMS_LOCAL_KEY
+
+        # ── License (installation JWT), pre-seeded as a Secret ────────────────
+        license:
+          secretName: marshal-license
+          key: jwt
+
+        # ── Datastores: external Postgres (pre-seeded DSN Secret) + bundled Redis
+        externalDatabaseSecret:
+          name: marshal-db
+          key: database-url
+        bundledDeps:
+          redis:
+            enabled: true
+
+        # ── Routing ───────────────────────────────────────────────────────────
+        ingress:
+          enabled: true
+          # Whatever ingress controller YOUR cluster runs — this path isn't tied to
+          # one cloud like the Terraform flavors are. Examples: "nginx", "gce-internal"
+          # (GKE), "alb" (EKS, plus the AWS Load Balancer Controller's own annotations).
+          className: nginx
+          host: marshal.acme.com
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: marshal
+
+  syncPolicy:
+    # Manual by default: install + every upgrade is a deliberate `argocd app
+    # sync marshal`, not a background auto-apply — same posture as the
+    # Terraform flavors requiring an explicit `terraform apply`. Once this
+    # path is trusted at your site, opt into GitOps proper by adding:
+    #   automated:
+    #     prune: true
+    #     selfHeal: true
+    # (see argocd/README.md's Day-2 section for the tradeoff — selfHeal will
+    # revert any manual kubectl fix applied during an incident).
+    syncOptions:
+      # Create the namespace on first sync. Note: you still seed the Secrets ABOVE
+      # into this namespace beforehand (create the ns manually the first time).
+      - CreateNamespace=true
+      - ServerSideApply=true

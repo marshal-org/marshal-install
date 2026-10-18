@@ -1,0 +1,83 @@
+# =============================================================================
+# gcp-gke — example tfvars
+# =============================================================================
+# Copy to terraform.tfvars in the gcp-gke/ dir and fill in.
+#
+#   gcloud auth application-default login
+#   cp examples/gcp-gke.tfvars.example gcp-gke/terraform.tfvars
+#   cd gcp-gke && terraform init && terraform apply
+#
+# Default posture below: reuse an existing cluster, external Cloud SQL Postgres,
+# bundled (in-cluster) Redis. To PROVISION a private cluster instead, see the
+# "Provision a private cluster" block at the bottom.
+# =============================================================================
+
+# ── GKE cluster to target ────────────────────────────────────────────────────
+project_id   = "acme-prod"
+cluster_name = "acme-gke"
+location     = "europe-west1" # region (regional cluster) or zone (zonal cluster)
+
+# ── From your Marshal onboarding ─────────────────────────────────────────────
+installation_jwt    = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9…"
+deployment_id       = "dep_ab12cd"
+registry_pull_token = "mrpt_9f3c…"
+
+# ── Product version + routing ────────────────────────────────────────────────
+chart_version = "0.5.0" # current version; confirm in your onboarding email
+ingress_host  = "marshal.acme.com"
+
+# ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
+# Postgres is the durable source of truth → managed Cloud SQL (private IP).
+database_mode = "external"
+database_url  = "postgres://marshal:PW@10.20.0.5:5432/marshal?sslmode=require"
+# Redis holds only ephemeral/reconstructible state → in-cluster is the default.
+redis_mode = "bundled"
+# To instead point at managed Memorystore:
+# redis_mode = "external"
+# redis_url  = "redis://10.30.0.4:6379"
+
+# ── Ingress / TLS ────────────────────────────────────────────────────────────
+# Marshal is internal-only by default (internal LB, IngressClass gce-internal).
+# internal_ingress = true   # default; set false to expose via an external GCLB
+# GKE-native internal static IP + managed cert:
+# ingress_annotations = {
+#   "kubernetes.io/ingress.regional-static-ip-name" = "marshal-ip"
+#   "networking.gke.io/managed-certificates"        = "marshal-cert"
+# }
+# Or bring your own TLS Secret:
+# ingress_tls = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]
+
+# ── Registry (default: direct pull from registry.marshal.codes) ──────────────
+# Recommended at scale — mirror through a GCP AR remote repo + Workload Identity:
+# registry           = "europe-west1-docker.pkg.dev/acme-prod/marshal-cache/marshal"
+# registry_auth_mode = "workloadIdentity"
+
+# ── Session port-previews (optional) ─────────────────────────────────────────
+# preview_domain = "preview.acme.com"
+
+# ── Webhook Relay + Slack (Auth Broker) — both optional, both default OFF ────
+# Leaving these unset doesn't error — Settings > Webhooks / Settings > Slack
+# just 404 in the UI with no other signal. Decide explicitly instead of
+# discovering the gap live. Both need outbound 443 from the cluster to
+# whichever host they point at (hooks.marshal.codes / auth.marshal.codes by
+# default — Marshal's hosted tier).
+# webhook_relay_enabled = true
+# auth_broker_url       = "https://auth.marshal.codes"
+
+# ── Provision a private cluster (instead of reusing one) ─────────────────────
+# Uncomment to have Terraform create a private GKE cluster (private nodes +
+# Cloud NAT + internal ingress), then install onto it. cluster_name becomes the
+# name of the NEW cluster.
+# deploy_cluster             = true
+# master_authorized_networks = [{ cidr_block = "10.8.0.0/24", display_name = "admin-vpn" }]
+# create_network             = true          # or false + network/subnetwork below
+# spaces_pools = {
+#   spaces = { machine_type = "e2-standard-4", disk_size_gb = 100, min_node_count = 1, max_node_count = 5 }
+# }
+# enable_private_endpoint    = true           # false = public endpoint, still authorized-only
+# deletion_protection        = true
+# When reusing an existing network:
+# network                    = "acme-vpc"
+# subnetwork                 = "acme-subnet"
+# pods_range_name            = "pods"
+# services_range_name        = "services"

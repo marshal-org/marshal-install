@@ -1,0 +1,13 @@
+Marshal self-hosted installer
+Copyright 2026 Marshal Security Ltd.
+
+This product includes software developed by Marshal Security Ltd.
+
+The Terraform code, Helm values wiring and ArgoCD Application in this
+repository are licensed under the Apache License, Version 2.0 (see LICENSE).
+
+That licence covers THIS INSTALLER ONLY. It grants no right to the Marshal
+product it installs: the container images and the Helm chart are served from
+registry.marshal.codes and require a valid installation JWT and registry pull
+token issued to your deployment. Running Marshal is governed by your agreement
+with Marshal Security Ltd., not by this licence.

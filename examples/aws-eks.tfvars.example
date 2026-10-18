@@ -1,0 +1,155 @@
+# =============================================================================
+# aws-eks — example tfvars
+# =============================================================================
+# Copy to terraform.tfvars in the aws-eks/ dir and fill in.
+#
+#   aws configure   # or export AWS_PROFILE=... — your normal credential chain
+#   cp examples/aws-eks.tfvars.example aws-eks/terraform.tfvars
+#   cd aws-eks && terraform init && terraform apply
+#
+# Posture below: reuse an existing EKS cluster, external RDS Postgres, bundled
+# (in-cluster) Redis. To PROVISION a new cluster (+ optionally RDS) instead,
+# see the block at the bottom.
+#
+# Before applying against an EXISTING (reused) cluster, confirm it already
+# has: an AWS Load Balancer Controller running, the EBS CSI driver addon
+# enabled, and this identity mapped to enough Kubernetes RBAC (EKS access
+# entry or aws-auth) — see aws-eks/README.md's Prerequisites section. The
+# provisioning path sets all of this up for you automatically.
+# =============================================================================
+
+# ── EKS cluster to target ────────────────────────────────────────────────────
+cluster_name = "acme-eks"
+region       = "eu-west-1"
+
+# ── From your Marshal onboarding ─────────────────────────────────────────────
+installation_jwt    = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9…"
+deployment_id       = "dep_ab12cd"
+registry_pull_token = "mrpt_9f3c…"
+
+# ── Product version + routing ────────────────────────────────────────────────
+chart_version = "0.5.0" # current version; confirm in your onboarding email
+ingress_host  = "marshal.acme.com"
+
+# ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
+# Postgres is the durable source of truth → managed RDS (private endpoint).
+database_mode = "external"
+database_url  = "postgres://marshal:PW@acme-db.abc123.eu-west-1.rds.amazonaws.com:5432/marshal?sslmode=require"
+# Redis holds only ephemeral/reconstructible state → in-cluster is the default.
+redis_mode = "bundled"
+# To instead point at managed ElastiCache:
+# redis_mode = "external"
+# redis_url  = "rediss://acme-cache.abc123.eu-west-1.cache.amazonaws.com:6379"
+
+# ── Ingress / TLS ────────────────────────────────────────────────────────────
+# Marshal is internal-only by default (internal ALB, IngressClass "alb").
+# internal_ingress = true   # default; set false to expose via an internet-facing ALB
+#
+# TLS: the ALB terminates with an ACM cert and nothing else (it cannot read a
+# k8s TLS Secret). The default tls_mode="self_signed" gives you a working HTTPS
+# listener with an UNTRUSTED cert. Three ways to get a real one:
+#
+#   1. A cert you already have in ACM, in THIS region. No DNS work here.
+# acm_certificate_arn = "arn:aws:acm:eu-west-1:123456789012:certificate/..."
+#
+#   2. Terraform requests one and Route53 validates it for you.
+# acm_request_certificate        = true
+# acm_validation_route53_zone_id = "Z0123456789ABCDEFGHIJ"
+#
+#   3. Terraform requests one, you add the CNAMEs in whatever DNS you run.
+#      Two applies: the first comes up on HTTP and prints the records
+#      (`terraform output acm_validation_records`), the second attaches the
+#      cert once `acm_certificate_status` reads ISSUED.
+# acm_request_certificate = true
+#
+# Or skip ACM and manage a k8s TLS Secret yourself. That is NOT enough on its
+# own for an ALB, so pair it with acm_certificate_arn:
+# ingress_tls = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]
+
+# ── Registry (default: direct pull from registry.marshal.codes) ─────────────
+# ECR cannot mirror registry.marshal.codes (hard AWS API limitation, not a gap
+# in this flavor). Two pull-through options instead:
+#   - deploy_cluster=true (provision path): an opt-in Harbor cache — only use
+#     it if direct-pull's shared rate limit becomes a real problem. See the
+#     README's Registry posture section for what this sets up and its one
+#     manual apply step.
+# create_harbor_cache = true
+#
+#   - deploy_cluster=false (reuse path, the default): point at a cache you
+#     already run (self-hosted Harbor/Zot/Distribution) — one per customer,
+#     reused across every install, not provisioned here:
+# image_cache_registry = "harbor.acme.internal/marshal"
+# registry_auth_mode   = "none"   # or "workloadIdentity" (IRSA) if the cache needs auth
+
+# ── Session port-previews (optional) ─────────────────────────────────────────
+# preview_domain = "preview.acme.com"
+
+# ── Webhook Relay + Slack (Auth Broker) — both optional, both default OFF ────
+# Leaving these unset doesn't error — Settings > Webhooks / Settings > Slack
+# just 404 in the UI with no other signal. Decide explicitly instead of
+# discovering the gap live. Both need outbound 443 from the cluster to
+# whichever host they point at (hooks.marshal.codes / auth.marshal.codes by
+# default — Marshal's hosted tier).
+# webhook_relay_enabled = true
+# auth_broker_url       = "https://auth.marshal.codes"
+
+# ── Provision a cluster (instead of reusing one) ─────────────────────────────
+# Uncomment to have Terraform create a new EKS cluster (VPC + two node groups
+# + OIDC/IRSA + EBS CSI addon + AWS Load Balancer Controller + a no-public-IP
+# bastion reachable via SSM), then install onto it. cluster_name becomes the
+# name of the NEW cluster. Replaces the database_mode/database_url block
+# above with create_rds if you want Terraform to provision RDS too, instead
+# of BYO. The cluster's API endpoint is private-only by default — see
+# aws-eks/README.md for the bastion apply workflow (create_bastion, on by
+# default) instead of a public endpoint.
+# deploy_cluster = true
+# create_rds     = true   # provisions RDS for you — drop database_url above if set
+#
+# RDS sizing and safety. The defaults are a cheap POC database (db.t4g.micro,
+# 20GB, single-AZ, 1-day backups) with deletion protection and a final snapshot
+# ON, which means `terraform destroy` refuses until you turn them off. That is
+# deliberate: this database holds the encrypted credential store and the audit
+# trail.
+# rds_instance_class          = "db.t4g.large"
+# rds_allocated_storage       = 50
+# rds_backup_retention_period = 7
+# rds_multi_az                = true    # roughly doubles the instance cost
+# rds_deletion_protection     = false   # only when you mean to tear this down
+# rds_skip_final_snapshot     = true    # only for a throwaway you intend to lose
+#
+# Pin both node groups into one AZ to drop cross-AZ transfer charges between
+# nodes, ALB and RDS. An AZ outage then takes the whole deployment down, and
+# changing this replaces both node groups.
+# node_availability_zone = "eu-west-1a"
+# availability_zones = ["eu-west-1a", "eu-west-1b"]
+#
+# ── Provision the cluster INTO A VPC YOU ALREADY RUN ─────────────────────────
+# The default above builds a dedicated VPC. To use your own network instead,
+# set create_network = false and name the VPC and subnets. Everything else is
+# still created for you: the cluster, both node groups, the bastion and RDS.
+#
+# Requirements, all checked at plan time so a wrong value stops in seconds
+# rather than twenty minutes into the apply:
+#   - at least two private subnets, in at least two different AZs (EKS refuses
+#     a cluster otherwise, even with node_availability_zone pinning the nodes)
+#   - every subnet belongs to vpc_id
+#   - a default route out of every private subnet, so nodes can pull images.
+#     Terraform cannot check this one. Run scripts/preflight-aws.sh first: it
+#     checks egress, free IP addresses and the subnet tags, read-only.
+# create_network     = false
+# vpc_id             = "vpc-0a1b2c3d"
+# private_subnet_ids = ["subnet-0aaa", "subnet-0bbb"]
+# public_subnet_ids  = []       # only for an internet-facing load balancer
+#
+# The load balancer controller finds subnets by tag, and fails silently with no
+# Kubernetes event when the tag is missing, so these are added for you. Each
+# tag is managed on its own, so your other tags are untouched. Set false only
+# if your own IaC owns these subnets' tags, and then add them yourself.
+# tag_existing_subnets = true   # default
+# node_instance_types           = ["m5.xlarge"]
+# control_plane_instance_types  = ["m5.2xlarge"]
+# Only if you want a public (still CIDR-locked) endpoint instead of the bastion:
+# cluster_endpoint_public_access = true
+# cluster_endpoint_public_access_cidrs = [
+#   { cidr_block = "203.0.113.4/32", display_name = "admin-access" }
+# ]
