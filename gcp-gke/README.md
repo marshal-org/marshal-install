@@ -299,8 +299,9 @@ Terraform creates, all in one apply, then installs onto it:
   `SSD_TOTAL_GB` quotas (summed across every entry in `spaces_pools` plus
   `control_plane`) — both can silently cap out well below what the numbers
   imply, and a rolling update that hits either mid-flight can deadlock a
-  zonal PV's node. See `.claude/skills/install-gcp-gke/SKILL.md` §9-10 for
-  the full capacity-planning math and quota gotchas, learned the hard way.
+  zonal PV's node. See https://docs.marshal.codes/sizing for the capacity
+  planning, and https://docs.marshal.codes/installing/gke for the quota
+  requirements.
 
 ```hcl
 deploy_cluster             = true

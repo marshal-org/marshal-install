@@ -11,6 +11,22 @@ examples/                  # per-flavor *.tfvars.example: copy, fill in about si
 argocd/                    # GitOps path: an ArgoCD Application for the same chart
 ```
 
+## Guided install
+
+If you use [Claude Code](https://claude.com/claude-code), this repository ships a skill that
+walks you through the whole install: it checks your cloud environment first, works through the
+configuration with you, runs the apply, and explains what a failure means instead of leaving
+you with a stack trace.
+
+```
+cd marshal-install
+claude            # then: /install-marshal
+```
+
+It never changes anything without telling you first, and it will not disable a safety check to
+make an apply pass. Everything it does is in this repository and on the pages below, so you can
+also just follow those by hand.
+
 ## Start here
 
 **The install guides live at [docs.marshal.codes](https://docs.marshal.codes/installing/prerequisites).**
@@ -70,7 +86,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.22.0 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.22.0-r2 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -135,4 +151,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.22.0`.
+Generated for Marshal chart version `0.22.0`, published as `v0.22.0-r2`.
