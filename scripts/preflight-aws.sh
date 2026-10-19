@@ -116,7 +116,7 @@ case "$quota" in
   ''|*[!0-9.]*) warn "on-demand vCPU quota" "could not read it: ${quota:-no value}" ;;
   *)
     q=${quota%.*}
-    if [ "$q" -ge 32 ]; then pass "on-demand vCPU quota" "$q vCPU"
+    if [ "$q" -ge 32 ]; then pass "on-demand vCPU quota" "$q vCPU limit (this is the LIMIT, not free capacity: subtract whatever the account already runs)"
     elif [ "$q" -ge 16 ]; then warn "on-demand vCPU quota" "$q vCPU, tight: 8 for the control plane plus sessions"
     else fail "on-demand vCPU quota" "$q vCPU is not enough for one m5.2xlarge plus a session node"
     fi ;;
@@ -251,7 +251,7 @@ if [ -n "$INGRESS_HOST" ]; then
   if [ -n "$found" ]; then
     pass "route53 zone" "$found  (certificate can validate automatically)"
   else
-    warn "route53 zone" "no hosted zone for $INGRESS_HOST in this account; expect the two-apply certificate flow"
+    warn "route53 zone" "no hosted zone for $INGRESS_HOST in this account. Only matters if you set acm_request_certificate=true, which then needs the two-apply flow: apply, add the printed CNAME yourself, apply again. With the default tls_mode=self_signed this does not apply and the install is one apply"
   fi
 else
   skip "route53 zone" "pass --ingress-host to check"

@@ -51,11 +51,43 @@ machine you run the install from, and there is a path that needs only one.
 | Their situation | Set | The install |
 |---|---|---|
 | A route into the VPC already: Twingate, Tailscale, Direct Connect, a transit gateway, a jump host | nothing | One `terraform apply` from their own machine |
-| No route in | `cluster_endpoint_public_access = true` and `cluster_endpoint_public_access_cidrs` holding their own address | One `terraform apply`, then set it back to private and apply once more |
+| No route in | `cluster_endpoint_public_access = true` and `cluster_endpoint_public_access_cidrs` holding their own address | One `terraform apply`. Leave it CIDR-locked until everything, teardown included, is done. Read the warning below before you narrow it again |
 | Policy forbids a public endpoint, even briefly | `create_bastion = true` | The **whole** install runs on the bastion |
 
 Prefer the first, then the second. Both run on one machine, in one pass, with no
 files moved between hosts.
+
+The CIDR list is a list of objects, not a list of strings. A bare string is
+rejected at plan time with `Invalid value for input variable`:
+
+```hcl
+cluster_endpoint_public_access       = true
+cluster_endpoint_public_access_cidrs = [
+  { cidr_block = "203.0.113.4/32", display_name = "operator" }
+]
+```
+
+**On the second path, returning the endpoint to private is a one-way door while
+you are outside the VPC. Do it last, or not at all.** Measured on a live install:
+the apply that makes the endpoint private succeeds, and from that moment every
+`terraform` command in this flavour exits 1 before touching anything:
+
+```
+Error: Kubernetes cluster unreachable: ... dial tcp 10.60.0.102:443: i/o timeout
+  with helm_release.aws_load_balancer_controller[0]
+```
+
+The Kubernetes and Helm providers connect while they configure, which happens
+during refresh, before any resource is read or changed. So the apply that would
+re-open the endpoint cannot reach the endpoint either. You cannot plan, apply or
+destroy, and the teardown in section 6 fails at its **first** apply, leaving RDS
+deletion protection still on in state.
+
+A CIDR-locked public endpoint is not an open endpoint: it is reachable from one
+address you control, and access still needs an IAM identity with an EKS access
+entry plus RBAC. Leaving it that way until the deployment is finished with is the
+right trade. If you have already locked yourself out, see "Kubernetes cluster
+unreachable, and no apply can fix it" below.
 
 The endpoint hostname resolves in public DNS even while the cluster is private.
 It answers with addresses inside the VPC, so a tunnel has to carry **routing to
@@ -100,6 +132,7 @@ A clean preflight proves the environment, not their permissions. Say so.
 ```bash
 cd aws-eks           # or gcp-gke, or single-node-k3s
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
+chmod 600 terraform.tfvars   # it will hold the licence JWT and the pull token
 ```
 
 **Agree `cluster_name` with them before you write it.** Do not invent one, and
@@ -208,6 +241,11 @@ expected, not a fault: see the TLS section of their cloud's page.
 Get it wrong and the destroy **deadlocks with no error message at all**, leaving
 the cluster and the database up and billing.
 
+If they reached the cluster through a CIDR-locked public endpoint, **check it is
+still open before you start**. The whole teardown runs terraform and `kubectl`
+against the API, and step 2 is the first thing that fails if it is private and
+you are outside the VPC.
+
 ```bash
 # 1. Turn off BOTH database guardrails, in terraform.tfvars:
 rds_deletion_protection = false
@@ -259,23 +297,39 @@ alone. `terraform output subnet_tags_left_as_yours` lists them, but run it
 **before** step 4: once the destroy has finished the state is empty and the same
 command prints `Warning: No outputs found` and still exits 0.
 
-Find anything that did survive:
+Find anything that did survive. **Every one of these is filtered by
+`<cluster_name>`, and that matters**: if they have more than one Marshal install
+in the account, an unfiltered search returns the other one's resources too, and
+the next block deletes whatever the search returned. Target group names differ
+only by a random suffix, so you cannot tell them apart by eye.
 
 ```bash
 aws ec2 describe-volumes --region <region> \
   --filters Name=tag:KubernetesCluster,Values=<cluster_name> \
   --query 'Volumes[].VolumeId' --output text
-aws elbv2 describe-target-groups --region <region> \
-  --query 'TargetGroups[?starts_with(TargetGroupName, `k8s-marshal`)].TargetGroupArn' --output text
+
+# Target groups by TAG, never by name prefix. Measured with two installs in one
+# account: a `starts_with(TargetGroupName, "k8s-marshal")` query returned six,
+# three of them belonging to a different, healthy cluster.
+aws resourcegroupstaggingapi get-resources --region <region> \
+  --resource-type-filters elasticloadbalancing:targetgroup \
+  --tag-filters Key=elbv2.k8s.aws/cluster,Values=<cluster_name> \
+  --query 'ResourceTagMappingList[].ResourceARN' --output text
+
 aws ec2 describe-security-groups --region <region> \
   --filters Name=tag:elbv2.k8s.aws/cluster,Values=<cluster_name> \
   --query 'SecurityGroups[].GroupId' --output text
+
+# Scoped to this cluster's database, not every manual snapshot in the account.
 aws rds describe-db-snapshots --region <region> --snapshot-type manual \
+  --db-instance-identifier <cluster_name>-postgres \
   --query 'DBSnapshots[].DBSnapshotIdentifier' --output text
 ```
 
 Then remove what they return, in this order, because a security group cannot go
-while a target group still references it:
+while a target group still references it. **Read each id back against the
+cluster name before you delete it.** These four commands are irreversible and
+they do not check whose resource it is:
 
 ```bash
 aws elbv2 delete-target-group --target-group-arn <arn>
@@ -287,8 +341,10 @@ aws rds delete-db-snapshot --db-snapshot-identifier <name>
 ## Warnings that are not problems
 
 - **`ipv6_association_id is deprecated` / `ipv6_cidr_block is deprecated`,
-  blamed on `cluster_private_access.tf`.** Every plan, apply and destroy prints
-  a few of these. Nothing on the line it names reads an IPv6 attribute: the
+  blamed on `cluster_private_access.tf`.** May appear on a plan or an apply, and
+  may not: one live run saw three per plan and apply and none on the destroy,
+  another on the same provider version saw none at all. Either way it is
+  harmless. Nothing on the line it names reads an IPv6 attribute: the
   warning comes from the AWS provider's own `aws_vpc` data source, and the line
   number is just where that data source is referenced. Harmless, nothing to
   change, and do not let anyone edit a `.tf` file over it.
@@ -321,6 +377,24 @@ aws rds delete-db-snapshot --db-snapshot-identifier <name>
 - **`terraform destroy` fails on the database.** Deletion protection is on by
   design. Set `rds_deletion_protection = false`, apply that, then destroy.
   Doing it in the other order tears down everything else first and then stops.
+- **`Kubernetes cluster unreachable`, and no apply can fix it.** You are outside
+  the VPC and the endpoint is private, so the Helm and Kubernetes providers
+  cannot configure, and that happens before terraform reads a single resource.
+  Every plan, apply and destroy exits 1. Terraform cannot dig you out, because
+  the change that would restore access is behind the connection it cannot make.
+  Re-open it with the AWS API directly, which does not go through the endpoint:
+
+  ```bash
+  aws eks update-cluster-config --name <cluster_name> --region <region> \
+    --resources-vpc-config endpointPublicAccess=true,endpointPrivateAccess=true,publicAccessCidrs=<your.ip>/32
+  aws eks describe-update --name <cluster_name> --region <region> --update-id <id>
+  ```
+
+  Wait for the update to report `Successful`, then carry on. Set
+  `cluster_endpoint_public_access = true` with the same CIDR in their tfvars too,
+  or the next apply will try to close it again. This is the only step in this
+  skill that goes around terraform, and it exists because the alternative is an
+  install nobody can remove.
 - **`terraform destroy` prints `Still destroying...` forever and never errors.**
   It is waiting on `helm_release.marshal`, which is waiting on the Ingress's
   `ingress.k8s.aws/resources` finalizer, which is waiting on a load balancer
