@@ -37,7 +37,7 @@ output "next_steps" {
     Marshal ${helm_release.marshal.version} installed as release "${helm_release.marshal.name}" in namespace "${var.namespace}".
 
     Verify:
-      aws eks update-kubeconfig --name <cluster> --region <region>   # kubectl needs this first
+      ${var.kubeconfig_command}
       kubectl get pods -n ${var.namespace}
       kubectl logs -n ${var.namespace} -l app.kubernetes.io/component=api -c migrate   # "migrations applied"
       kubectl logs -n ${var.namespace} -l app.kubernetes.io/component=api --tail=-1 | grep "license state"
@@ -50,8 +50,11 @@ output "next_steps" {
 
     ⚠ TLS cert is a Marshal-generated PLACEHOLDER (self-signed, Subject O=
       "Marshal Platform Temp Cert") — browsers/clients will warn. Replace it
-      with tls_mode="inline" (paste real PEM into tfvars) or tls_mode="secret"
-      (point at a Secret you manage, e.g. cert-manager) whenever you're ready;
+      with tls_mode="inline" (paste real PEM into tfvars), or with a mode your
+      platform supports. Read the TLS section of your cloud's README before
+      switching: an AWS load balancer serves certificates from ACM and cannot
+      read a Kubernetes TLS Secret at all, so tls_mode="secret" needs more than
+      a one-line change there;
       no other config needs to change.
     %{endif~}
 

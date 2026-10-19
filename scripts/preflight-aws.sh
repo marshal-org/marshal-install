@@ -17,7 +17,8 @@
 #     [--public-subnets subnet-c,subnet-d] \
 #     [--cluster-name marshal-poc] [--ingress-host marshal.acme.com] \
 #     [--acm-arn arn:aws:acm:...] \
-#     [--deployment-id dep_ab12cd --pull-token mrpt_… --chart-version 0.20.1]
+#     [--deployment-id dep_ab12cd --pull-token mrpt_… --chart-version 0.23.0] \
+#     [--k8s-version 1.36] [--rds-version 16.14]
 #
 # Exit code is 1 if anything FAILED, 0 if everything passed or only warned.
 set -uo pipefail
@@ -40,7 +41,7 @@ while [ $# -gt 0 ]; do
     --chart-version)   CHART_VERSION="${2:-}";   shift 2 ;;
     --k8s-version)     K8S_VERSION="${2:-}";     shift 2 ;;
     --rds-version)     RDS_VERSION="${2:-}";     shift 2 ;;
-    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done

@@ -224,6 +224,12 @@ variable "redis_url" {
 
 # ── Public routing / ingress (REQUIRED: ingress_host) ────────────────────────
 
+variable "kubeconfig_command" {
+  description = "The cloud-specific command that points kubectl at the new cluster, printed verbatim in next_steps. Each flavor sets its own; the default is deliberately not runnable, because this module does not know the cluster's name, region or project."
+  type        = string
+  default     = "# point kubectl at the new cluster first; see your cloud's README"
+}
+
 variable "ingress_host" {
   description = "Primary app hostname — web + api + gateway are path-routed under it. Example: \"marshal.acme.com\". For a quick k3s test with no real DNS use an sslip.io host like \"marshal.203-0-113-5.sslip.io\"."
   type        = string

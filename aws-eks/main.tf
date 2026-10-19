@@ -96,6 +96,8 @@ module "marshal" {
   chart         = var.chart
   chart_version = var.chart_version
 
+  kubeconfig_command = "aws eks update-kubeconfig --name ${var.cluster_name} --region ${var.region}"
+
   installation_jwt    = var.installation_jwt
   deployment_id       = var.deployment_id
   registry_pull_token = var.registry_pull_token

@@ -57,8 +57,12 @@ for you automatically:
   balancer) and nothing above is created; the cluster, both node groups, the
   bastion and RDS all land in subnets you already run. The same three subnet
   tags are added to them by `aws_ec2_tag` (`tag_existing_subnets`, default
-  true), one tag at a time so the rest of your tags are untouched; set it false
-  when your own IaC owns those tags, and add them yourself. Validated at plan
+  true), one tag at a time so the rest of your tags are untouched, and **only
+  where the tag is missing**: a tag your subnet already carries is skipped
+  entirely, so this installer never takes ownership of it and a `destroy`
+  cannot remove it. `terraform output subnet_tags_left_as_yours` lists the ones
+  it skipped. Set `tag_existing_subnets = false` when your own IaC owns those
+  tags, and add them yourself. Validated at plan
   time by preconditions in `main.tf`: the subnets have to belong to `vpc_id`
   and cover at least two AZs, because EKS refuses a cluster otherwise. Egress
   is NOT validated here: `data.aws_route_table` given only a `subnet_id` errors
@@ -125,9 +129,10 @@ for you automatically:
 ## TLS: where the certificate comes from
 
 The ALB terminates TLS with an **ACM certificate and nothing else** (see
-`alb_tls.tf`'s header for the live proof, and why `tls_mode="self_signed"` once
-alone means HTTP-only on this flavor specifically). Three real-certificate
-paths, mutually exclusive, both postures:
+`alb_tls.tf`'s header for the live proof). `tls_mode="self_signed"` is NOT
+HTTP-only here: this flavor imports the generated placeholder into ACM, so you
+get a working HTTPS:443 listener with an untrusted certificate, confirmed on a
+live install. Three real-certificate paths, mutually exclusive, both postures:
 
 | Path | Variables | DNS work |
 |---|---|---|

@@ -4,7 +4,7 @@
 # Copy to terraform.tfvars in the aws-eks/ dir and fill in.
 #
 #   aws configure   # or export AWS_PROFILE=... — your normal credential chain
-#   cp examples/aws-eks.tfvars.example aws-eks/terraform.tfvars
+#   cd aws-eks && cp ../examples/aws-eks.tfvars.example terraform.tfvars
 #   cd aws-eks && terraform init && terraform apply
 #
 # Posture below: reuse an existing EKS cluster, external RDS Postgres, bundled
@@ -95,13 +95,14 @@ redis_mode = "bundled"
 
 # ── Provision a cluster (instead of reusing one) ─────────────────────────────
 # Uncomment to have Terraform create a new EKS cluster (VPC + two node groups
-# + OIDC/IRSA + EBS CSI addon + AWS Load Balancer Controller + a no-public-IP
-# bastion reachable via SSM), then install onto it. cluster_name becomes the
+# + OIDC/IRSA + EBS CSI addon + AWS Load Balancer Controller), then install
+# onto it. cluster_name becomes the
 # name of the NEW cluster. Replaces the database_mode/database_url block
 # above with create_rds if you want Terraform to provision RDS too, instead
 # of BYO. The cluster's API endpoint is private-only by default — see
-# aws-eks/README.md for the bastion apply workflow (create_bastion, on by
-# default) instead of a public endpoint.
+# aws-eks/README.md for the three ways to reach it. create_bastion is OFF by
+# default; set it true only if your policy forbids a public endpoint even
+# briefly, and then the whole install runs on that bastion.
 # deploy_cluster = true
 # create_rds     = true   # provisions RDS for you — drop database_url above if set
 #
@@ -126,7 +127,7 @@ redis_mode = "bundled"
 # ── Provision the cluster INTO A VPC YOU ALREADY RUN ─────────────────────────
 # The default above builds a dedicated VPC. To use your own network instead,
 # set create_network = false and name the VPC and subnets. Everything else is
-# still created for you: the cluster, both node groups, the bastion and RDS.
+# still created for you: the cluster, both node groups and RDS.
 #
 # Requirements, all checked at plan time so a wrong value stops in seconds
 # rather than twenty minutes into the apply:

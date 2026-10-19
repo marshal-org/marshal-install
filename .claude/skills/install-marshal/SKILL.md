@@ -88,7 +88,7 @@ network. Do not pass `--cluster-name` unless they are reusing a cluster: the
 |---|---|
 | `routes via an internet gateway, so this subnet is PUBLIC` | They gave you public subnets believing they were private. Ask for the private tier. The most common mix-up. |
 | `no 0.0.0.0/0 route` | Nodes cannot pull images and the install will fail partway. They need NAT, a transit gateway or a proxy first. |
-| `kubernetes.io/role/internal-elb absent` | Either let `tag_existing_subnets` add it, or they add it. Without it the Ingress never gets an address **and emits no events**, which is slow to diagnose. |
+| `kubernetes.io/role/internal-elb absent` | Let `tag_existing_subnets` add it, which is the default. Without it the Ingress never gets an address **and emits no events**, which is slow to diagnose. If the tag is already there the installer leaves it alone, so a later teardown cannot remove a tag that was theirs. |
 | `only N free IPs` | Every pod takes a real subnet IP, so this caps concurrent sessions. Under about 60, ask for a bigger subnet now. |
 | `AZ coverage: 1 AZ` | EKS will not create a cluster. Get a second subnet. |
 | `on-demand vCPU quota` low | A quota increase can take days. Start it immediately. The default shape needs **12 vCPU** (one `m5.xlarge` node plus one `m5.2xlarge` control-plane node). 32 is comfortable; 16 gets tight as soon as a second node scales up. |
@@ -154,8 +154,10 @@ aws s3api put-public-access-block --bucket <name>-tfstate \
 Name it so it contains `tfstate`. The bastion's IAM role grants S3 only on
 `arn:aws:s3:::*tfstate*`, so another name works from their machine and fails on
 the bastion, which is a confusing way to find out. Then add `backend_override.tf`
-(gitignored, so it survives a version switch) and `terraform init
--migrate-state`. The state holds their licence token, registry token and
+(gitignored, so it survives a version switch) and run `terraform init`. Use
+`terraform init -migrate-state` **only** if you already ran an apply against
+local state; on a first install there is nothing to migrate and plain `init`
+is correct. The state holds their licence token, registry token and
 database password, so versioning, encryption and a public access block are not
 optional.
 
@@ -196,44 +198,55 @@ expected, not a fault: see the TLS section of their cloud's page.
 ## 6. Tearing one down
 
 `terraform destroy` on its own does not do it, and the order is not optional.
-Run it in the wrong order and the destroy **deadlocks with no error message at
-all**, leaving the cluster and the database up and billing.
+Get it wrong and the destroy **deadlocks with no error message at all**, leaving
+the cluster and the database up and billing.
 
 ```bash
-# 1. Delete the workload FIRST. This is not tidiness. It removes the Ingress and
-#    its finalizer before terraform can revoke the load balancer controller's
-#    IAM policy, which is what otherwise deadlocks the destroy. It also lets the
-#    EBS CSI driver delete the PVC volumes while it still has permission to.
-kubectl delete namespace marshal      # about 15s; the EBS volumes go with it
-
-# 2. Turn off BOTH database guardrails, in terraform.tfvars:
+# 1. Turn off BOTH database guardrails, in terraform.tfvars:
 rds_deletion_protection = false
 rds_skip_final_snapshot = true        # leave this out to KEEP a final snapshot
 
-# 3. Apply them. Setting them is not enough on its own: `terraform destroy`
+# 2. Apply them. Setting them is not enough on its own: `terraform destroy`
 #    reads both values out of STATE, not out of your tfvars, so a flag that has
 #    never been through an apply has no effect and you get the snapshot anyway.
 terraform apply
 
-# 4. Now it can run.
+# 3. NOW delete the workload, and not before. This takes the Ingress and its
+#    finalizer away before terraform can revoke the load balancer controller's
+#    IAM policy, which is what otherwise deadlocks the destroy, and it lets the
+#    EBS CSI driver delete the PVC volumes while it still has permission to.
+kubectl delete namespace marshal      # under a minute; the EBS volumes go too
+
+# 4. Then destroy.
 terraform destroy
 ```
 
-Step 3 is normally a quick in-place database change. On a cluster whose install
+**Do not move step 3 to the front.** Terraform owns the Helm release, so once
+the namespace is gone the apply in step 2 sees the release as deleted and
+**reinstalls the entire product**. Measured on a real teardown: `Plan: 5 to add,
+1 to change`, which put back the load balancer, three target groups, two
+controller-created security groups and the Redis volume roughly two minutes
+before the destroy ran. Flags first, apply, then the namespace.
+
+Step 2 is normally a quick in-place database change. On a cluster whose install
 failed partway it can also replace a tainted addon, so read the plan instead of
 assuming.
 
 **What outlives the destroy**, because Terraform never owned any of it:
 
-- **A final RDS snapshot**, `<cluster_name>-postgres-final`, unless you skipped it
-  in step 2. Keep it if the data matters. It also blocks a rebuild under the same
-  cluster name, because the snapshot name collides.
-- **EBS volumes from PersistentVolumeClaims**, if you skipped step 1.
+- **A final RDS snapshot**, `<cluster_name>-postgres-final`, unless you skipped
+  it in step 1. Keep it if the data matters. It also blocks a rebuild under the
+  same cluster name, because the snapshot name collides.
+- **EBS volumes from PersistentVolumeClaims**, if you skipped step 3.
 - **The load balancer, its target groups, and any security group the controller
   created**, if the controller lost its IAM policy before it finished its own
-  cleanup. Step 1 prevents this as well.
+  cleanup. Step 3 prevents this as well.
 
-Find all of it:
+Subnet tags your subnets already carried are **not** in that list and are not at
+risk: the installer skips any tag that was already there, so a destroy leaves it
+alone. `terraform output subnet_tags_left_as_yours` lists them.
+
+Find anything that did survive:
 
 ```bash
 aws ec2 describe-volumes --region <region> \
@@ -248,8 +261,8 @@ aws rds describe-db-snapshots --region <region> --snapshot-type manual \
   --query 'DBSnapshots[].DBSnapshotIdentifier' --output text
 ```
 
-Then remove whatever they return, in this order, because a security group cannot
-go while a target group still references it:
+Then remove what they return, in this order, because a security group cannot go
+while a target group still references it:
 
 ```bash
 aws elbv2 delete-target-group --target-group-arn <arn>
