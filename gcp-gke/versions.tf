@@ -4,7 +4,7 @@ terraform {
   required_providers {
     google = {
       source  = "hashicorp/google"
-      version = ">= 5.0, < 7.0"
+      version = ">= 6.0, < 7.0" # control_plane_endpoints_config (cluster.tf) is 6.x-only
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"

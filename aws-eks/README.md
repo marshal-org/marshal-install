@@ -61,7 +61,20 @@ for you automatically:
   where the tag is missing**: a tag your subnet already carries is skipped
   entirely, so this installer never takes ownership of it and a `destroy`
   cannot remove it. `terraform output subnet_tags_left_as_yours` lists the ones
-  it skipped. Set `tag_existing_subnets = false` when your own IaC owns those
+  it skipped, and read it **before** a destroy, because afterwards the state is
+  empty and the command prints `No outputs found`.
+
+  Telling the two apart needs a record, so the installer writes **a fourth tag**,
+  `marshal.codes/installer-owned-tags`, whose value is the list of keys it
+  manages on that subnet. `destroy` removes it along with the tags it describes,
+  so a teardown leaves the subnet as it was found. Without that record the filter
+  is unstable: it cannot tell "already yours" from "mine, added last apply", so
+  apply 2 reads its own tag back as pre-existing and **destroys** it, which
+  strips the cluster tag on a routine `chart_version` upgrade. Verified against
+  live subnets: three consecutive applies converge (`No changes` on 2 and 3) and
+  a destroy leaves a pre-existing `kubernetes.io/role/internal-elb` in place.
+
+  Set `tag_existing_subnets = false` when your own IaC owns those
   tags, and add them yourself. Validated at plan
   time by preconditions in `main.tf`: the subnets have to belong to `vpc_id`
   and cover at least two AZs, because EKS refuses a cluster otherwise. Egress
@@ -231,6 +244,13 @@ terraform init
 terraform plan   # review
 terraform apply
 ```
+
+Decide where the state lives **before** that first `init`. The default is a local
+`terraform.tfstate` file, which holds your licence token, registry pull token and
+database password in cleartext and exists only on the machine you ran it from.
+For anything you intend to keep, create a versioned, encrypted S3 bucket with a
+public access block, point `backend_override.tf` at it, and then `init`. Doing it
+afterwards means `terraform init -migrate-state` instead.
 
 `terraform output next_steps` prints the verify commands and the app URL.
 

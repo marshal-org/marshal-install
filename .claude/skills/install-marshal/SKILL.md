@@ -88,7 +88,7 @@ network. Do not pass `--cluster-name` unless they are reusing a cluster: the
 |---|---|
 | `routes via an internet gateway, so this subnet is PUBLIC` | They gave you public subnets believing they were private. Ask for the private tier. The most common mix-up. |
 | `no 0.0.0.0/0 route` | Nodes cannot pull images and the install will fail partway. They need NAT, a transit gateway or a proxy first. |
-| `kubernetes.io/role/internal-elb absent` | Let `tag_existing_subnets` add it, which is the default. Without it the Ingress never gets an address **and emits no events**, which is slow to diagnose. If the tag is already there the installer leaves it alone, so a later teardown cannot remove a tag that was theirs. |
+| `kubernetes.io/role/internal-elb absent` | Let `tag_existing_subnets` add it, which is the default. Without it the Ingress never gets an address **and emits no events**, which is slow to diagnose. If the tag is already there the installer leaves it alone, so a later teardown cannot remove a tag that was theirs: it records what it owns in a `marshal.codes/installer-owned-tags` tag on each subnet, removed again at destroy. |
 | `only N free IPs` | Every pod takes a real subnet IP, so this caps concurrent sessions. Under about 60, ask for a bigger subnet now. |
 | `AZ coverage: 1 AZ` | EKS will not create a cluster. Get a second subnet. |
 | `on-demand vCPU quota` low | A quota increase can take days. Start it immediately. The default shape needs **12 vCPU** (one `m5.xlarge` node plus one `m5.2xlarge` control-plane node). 32 is comfortable; 16 gets tight as soon as a second node scales up. |
@@ -107,7 +107,7 @@ do not reach for something like `marshal-test`: it is the name of real
 infrastructure in their account, it is stamped into node groups, IAM roles,
 security groups and the database's final snapshot, and changing it later means
 replacing all of them. Ask what their naming convention is. If this really is a
-throwaway, have them say so, because that changes the RDS answers in step 3
+throwaway, have them say so, because that changes the RDS answers in section 6
 too.
 
 `chart_version` comes from their onboarding, not from the example file. The
@@ -121,21 +121,6 @@ their licence token, registry token and database password. Never paste either
 into a chat, a ticket or a commit in this clone.
 
 ## 4. Apply
-
-```bash
-terraform init
-terraform plan      # read it with them before applying
-terraform apply
-```
-
-The plan stops early on a bad input rather than failing twenty minutes in. If a
-precondition fires, the message says what to change; it is a real requirement,
-not a warning to route around.
-
-One apply does the whole install: the AWS resources and the Kubernetes ones, in
-dependency order. Do not split it, and **never narrow it with `-target`**.
-`-target` pulls in a resource's dependencies but not its dependents, so
-targeting one resource quietly skips the policy attachments that hang off it.
 
 **Put the state in S3 before the first apply.** It is their state either way, but
 a bucket survives a lost laptop, and it is the only way a second person can run
@@ -160,6 +145,23 @@ local state; on a first install there is nothing to migrate and plain `init`
 is correct. The state holds their licence token, registry token and
 database password, so versioning, encryption and a public access block are not
 optional.
+
+Only then apply:
+
+```bash
+terraform init
+terraform plan      # read it with them before applying
+terraform apply
+```
+
+The plan stops early on a bad input rather than failing twenty minutes in. If a
+precondition fires, the message says what to change; it is a real requirement,
+not a warning to route around.
+
+One apply does the whole install: the AWS resources and the Kubernetes ones, in
+dependency order. Do not split it, and **never narrow it with `-target`**.
+`-target` pulls in a resource's dependencies but not its dependents, so
+targeting one resource quietly skips the policy attachments that hang off it.
 
 **If the apply reaches the Kubernetes resources and cannot connect**, the machine
 has no route to the private endpoint. The AWS half is already created and in the
@@ -244,7 +246,9 @@ assuming.
 
 Subnet tags your subnets already carried are **not** in that list and are not at
 risk: the installer skips any tag that was already there, so a destroy leaves it
-alone. `terraform output subnet_tags_left_as_yours` lists them.
+alone. `terraform output subnet_tags_left_as_yours` lists them, but run it
+**before** step 4: once the destroy has finished the state is empty and the same
+command prints `Warning: No outputs found` and still exits 0.
 
 Find anything that did survive:
 

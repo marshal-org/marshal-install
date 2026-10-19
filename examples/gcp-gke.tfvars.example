@@ -81,3 +81,28 @@ redis_mode = "bundled"
 # subnetwork                 = "acme-subnet"
 # pods_range_name            = "pods"
 # services_range_name        = "services"
+
+# ── Reaching the control plane without a bastion ─────────────────────────────
+# A private control plane normally means terraform and kubectl must run inside
+# the VPC, which is why the flavor's README walks through a throwaway IAP
+# bastion. Turning on the Google-managed DNS endpoint instead makes the control
+# plane reachable from anywhere and gates it on the container.clusters.connect
+# IAM permission, so master_authorized_networks may stay empty and never needs
+# re-applying when your IP changes.
+#
+#   gcloud container clusters get-credentials <cluster> \
+#     --location <loc> --dns-endpoint
+#
+# dns_endpoint_enabled = true
+
+# ── Let ArgoCD own the release (provision only) ───────────────────────────────
+# Build the cluster, registry cache, buckets and static IP, install nothing —
+# see ../argocd/. Terraform still computes every cloud-derived chart value, so
+# feed them to the Application from the output rather than retyping them:
+#
+#   terraform output -raw argocd_derived_values > values-derived.yaml
+#
+# deployment_id and registry_pull_token must still be REAL in this mode (the
+# registry cache uses them as upstream credentials); only installation_jwt can
+# be a placeholder.
+# install_marshal = false

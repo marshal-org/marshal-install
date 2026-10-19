@@ -54,6 +54,7 @@ locals {
 
 module "marshal" {
   source = "../modules/marshal-install"
+  count  = var.install_marshal ? 1 : 0
 
   create_namespace = true
   namespace        = var.namespace
@@ -128,7 +129,7 @@ check "redis_url_supplied" {
 
 check "authorized_networks_supplied" {
   assert {
-    condition     = !var.deploy_cluster || length(var.master_authorized_networks) > 0
-    error_message = "deploy_cluster=true requires master_authorized_networks (at least your admin CIDR) — otherwise you cannot reach the control plane."
+    condition     = !var.deploy_cluster || var.dns_endpoint_enabled || length(var.master_authorized_networks) > 0
+    error_message = "deploy_cluster=true requires master_authorized_networks (at least your admin CIDR) — otherwise you cannot reach the control plane. Set dns_endpoint_enabled=true to reach it over the IAM-gated DNS endpoint instead."
   }
 }

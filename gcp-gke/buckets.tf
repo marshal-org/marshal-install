@@ -90,11 +90,22 @@ resource "google_storage_bucket_iam_member" "spaces_persistence_object_admin" {
 # Bind the GSA to the api's KSA (namespace/name the chart creates: see
 # modules/marshal-install's release_name -> "<release_name>-api"). Workload
 # Identity, not a downloaded key — no credential to leak or rotate.
+#
+# depends_on the cluster, which is what BRINGS THE POOL INTO EXISTENCE:
+# <project>.svc.id.goog does not exist until the project's first
+# Workload-Identity cluster is created, and without this the binding races it on
+# a fresh project and fails with "Error 400: Identity Pool does not exist" — an
+# error that reads like a typo in the member string. The cluster is count 0 in
+# reuse mode, where depends_on is a harmless no-op and the pool already exists.
+# (Hit for real on a from-scratch build, 2026-10-15. The README's two-phase
+# -target apply happens to dodge it, which is why it has stayed hidden.)
 resource "google_service_account_iam_member" "storage_workload_identity" {
   count              = local.create_any_storage_bucket ? 1 : 0
   service_account_id = google_service_account.storage[0].name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.namespace}/${var.release_name}-api]"
+
+  depends_on = [google_container_cluster.this]
 }
 
 # Also bind the GSA to the SUPERVISOR's KSA. Session pods run in a SEPARATE
@@ -104,11 +115,22 @@ resource "google_service_account_iam_member" "storage_workload_identity" {
 # this, the supervisor has no cloud identity and every GCS call 403s (the api's
 # space-storage connection test still passes, since it runs in the api pod, which
 # masks the failure). Gated on the spaces bucket: the supervisor never uses audit.
+#
+# depends_on the cluster, which is what BRINGS THE POOL INTO EXISTENCE:
+# <project>.svc.id.goog does not exist until the project's first
+# Workload-Identity cluster is created, and without this the binding races it on
+# a fresh project and fails with "Error 400: Identity Pool does not exist" — an
+# error that reads like a typo in the member string. The cluster is count 0 in
+# reuse mode, where depends_on is a harmless no-op and the pool already exists.
+# (Hit for real on a from-scratch build, 2026-10-15. The README's two-phase
+# -target apply happens to dodge it, which is why it has stayed hidden.)
 resource "google_service_account_iam_member" "storage_workload_identity_supervisor" {
   count              = var.create_spaces_persistence_bucket ? 1 : 0
   service_account_id = google_service_account.storage[0].name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.release_name}-spaces/${var.release_name}-supervisor]"
+
+  depends_on = [google_container_cluster.this]
 }
 
 output "audit_persistence_bucket" {

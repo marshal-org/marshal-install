@@ -32,6 +32,42 @@ rotates it). The Application in this dir is already set to `existing`.
   token — see [Credentials](../README.md#credentials-read-this-first).
 - A **Postgres 16** DSN the cluster can reach (external / managed).
 
+## On GKE: let Terraform provision, ArgoCD install
+
+If the cluster doesn't exist yet, the [`gcp-gke`](../gcp-gke/) flavor can build it
+and install nothing: `install_marshal = false` creates the cluster, node pools,
+registry cache, buckets and static IP, makes no `kubernetes`/`helm` provider call,
+and leaves the release to the Application here. `deployment_id` and
+`registry_pull_token` must still be **real** values in that mode (the registry
+cache uses them as its upstream credentials); only `installation_jwt` can be a
+placeholder.
+
+**Take the Application's cloud-derived values from the Terraform output, don't
+retype them** — Terraform computes them whether or not it installs:
+
+```bash
+cd ../gcp-gke && terraform output -raw argocd_derived_values > values-derived.yaml
+```
+
+That covers `global.registry`, `toolsRegistryBase`, `registryAuth.mode`,
+`ingress.className`/`annotations`, `api.serviceAccount.annotations`,
+`supervisor.serviceAccount.annotations`, `controlPlane.nodeSelector`/`tolerations`,
+and — when Redis is bundled and the control-plane pool is tainted —
+`redis.master.nodeSelector`/`tolerations`, which `controlPlane.*` does not cover
+(the bundled Bitnami subcharts don't read it). Re-render it after any apply that
+changes the project, cluster name, cache repo, buckets or the taint toggle.
+Everything else in the Application is a value you chose yourself.
+
+One of those fails **silently**: a missing or wrong
+`supervisor.serviceAccount.annotations` makes every object-storage call 403 at
+session runtime (the supervisor does the spaces-persistence blob I/O inside
+session pods) while the api's own storage connection test still passes — so the
+install looks healthy. The only check that exercises it is to launch a space, stop
+it, and resume it.
+
+`secrets.provider: existing` is required on this path like any other ArgoCD
+install — see the gotcha above and step 2 below.
+
 ## 1. Register the OCI chart repo credential in ArgoCD
 
 ArgoCD needs the pull token to fetch the chart from `registry.marshal.codes`:

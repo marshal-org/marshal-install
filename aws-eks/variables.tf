@@ -421,7 +421,7 @@ variable "registry_pull_token" {
 # ── Product version + routing (REQUIRED) ─────────────────────────────────────
 
 variable "chart_version" {
-  description = "Marshal chart (== product) version, e.g. \"0.5.0\" (current). Bump + re-apply to upgrade."
+  description = "Marshal chart (== product) version, e.g. \"0.23.0\". Bump + re-apply to upgrade. There is no default on purpose: the version you install is the one you were issued."
   type        = string
 }
 

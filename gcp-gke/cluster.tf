@@ -143,6 +143,24 @@ resource "google_container_cluster" "this" {
     }
   }
 
+  # IAM-gated DNS endpoint (container.clusters.connect), the one control-plane
+  # path that needs neither a bastion nor an allowlist re-applied every time the
+  # operator's IP moves. The block is absent unless asked for, so the live
+  # customer clusters plan no change.
+  #
+  # Deliberately does NOT turn the IP endpoint off, even though that would be
+  # stricter: doing so makes GKE derive enable_private_endpoint = true, which
+  # every later plan then wants to strip back to null. One of our own internal
+  # clusters carries that scar: it has to declare the derived value to stop it.
+  dynamic "control_plane_endpoints_config" {
+    for_each = var.dns_endpoint_enabled ? [1] : []
+    content {
+      dns_endpoint_config {
+        allow_external_traffic = true
+      }
+    }
+  }
+
   # Keyless GCP/AR auth — pairs with registry_auth_mode = "workloadIdentity".
   workload_identity_config {
     workload_pool = "${var.project_id}.svc.id.goog"

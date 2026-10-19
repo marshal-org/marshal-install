@@ -526,3 +526,39 @@ variable "values_overrides" {
   type        = list(string)
   default     = []
 }
+
+
+# ── Install mode ─────────────────────────────────────────────────────────────
+
+variable "install_marshal" {
+  description = <<-EOT
+    true (default) = this apply installs Marshal with helm, as it always has.
+    false = PROVISION ONLY: build the cluster, node pools, registry cache,
+    buckets and static IP, but install nothing — something else (ArgoCD) owns
+    the release. Mirrors single-node-k3s's provision-only path, except that one
+    reuses deploy_cluster for the same purpose; here deploy_cluster already
+    means "create the cluster", so the install needs its own switch.
+
+    In this mode terraform still COMPUTES every GKE-derived chart value — read
+    them with `terraform output -raw argocd_derived_values` and feed that into
+    the ArgoCD Application. Do not retype them: the registry endpoints and the
+    storage GSA email are derived, and a wrong supervisor annotation fails only
+    at session runtime (see buckets.tf).
+  EOT
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "dns_endpoint_enabled" {
+  description = <<-EOT
+    Expose the control plane on its Google-managed DNS endpoint, reachable from
+    anywhere and gated by the container.clusters.connect IAM permission instead
+    of an IP allowlist. Lets an operator run kubectl without a bastion and
+    without master_authorized_networks drifting open — the same trade
+    one of our own internal clusters makes.
+  EOT
+  type        = bool
+  default     = false
+  nullable    = false
+}

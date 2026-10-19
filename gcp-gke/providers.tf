@@ -54,9 +54,29 @@ provider "helm" {
   # ref pulls without a manual `helm registry login`. Harmless when no token
   # (local-path chart / dev) — these creds are only exercised on an actual
   # oci://registry.marshal.codes chart pull, which a local chart path never does.
-  registry {
-    url      = "oci://registry.marshal.codes"
-    username = var.deployment_id
-    password = var.registry_pull_token
+  #
+  # Skipped when nothing is installed, exactly as single-node-k3s skips it on its
+  # own provision path, and for the same reason: helm logs in when the provider is
+  # CONFIGURED, not when a chart is pulled. A provision-only apply would
+  # otherwise die at PLAN time on "unauthorized: invalid pull token" with no
+  # chart in sight.
+  #
+  # The for_each shape matters. `bool ? [1] : []` is the form already proven on
+  # the k3s flavor; CLAUDE.md records a real customer-deploy failure from a
+  # different shape here, and validate cannot catch it because it never
+  # evaluates for_each against concrete values.
+  #
+  # Known limitation, deliberately not fixed here: the url is pinned to the
+  # production registry while the chart host is var.chart's. They agree for every
+  # install today. An install_marshal = true run against a non-prod backbone
+  # would hit the same login failure, and the fix is to derive this host from
+  # var.chart — out of scope for this change.
+  dynamic "registry" {
+    for_each = var.install_marshal ? [1] : []
+    content {
+      url      = "oci://registry.marshal.codes"
+      username = var.deployment_id
+      password = var.registry_pull_token
+    }
   }
 }

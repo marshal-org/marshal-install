@@ -374,6 +374,72 @@ Delete the bastion once you're done (`deletion_protection` doesn't apply to it �
 it's not part of this Terraform config, just a manual `gcloud compute instances
 delete`).
 
+### Skipping the bastion: `dns_endpoint_enabled = true`
+
+The bastion above exists only because the `kubernetes`/`helm` providers dial the
+control-plane IP directly. `dns_endpoint_enabled = true` gives the cluster its
+Google-managed DNS endpoint, which is reachable from anywhere and gated by the
+`container.clusters.connect` IAM permission instead of by source IP — so a
+one-phase apply works from a laptop, and `master_authorized_networks` may stay
+empty (the plan-time check accepts that combination).
+
+This is the trade one of our own internal clusters already makes: an IP allowlist
+has to be re-applied every time the operator's address changes, and it drifts
+open because nobody prunes it. The flag deliberately leaves the IP endpoint
+switched ON — turning it off makes GKE derive `enable_private_endpoint = true`
+on the cluster, which every later plan then wants to strip back to `null`.
+
+Fetch a kubeconfig for it with:
+
+```bash
+gcloud container clusters get-credentials <cluster> --location <loc> --dns-endpoint
+```
+
+## Provision only — when ArgoCD owns the release (`install_marshal = false`)
+
+Default is `true`: this apply installs the chart, as it always has. Set it to
+`false` and Terraform builds the cluster, node pools, registry cache, buckets and
+static IP but installs nothing, leaving the release to ArgoCD (the GitOps path in
+`../argocd/`). No `kubernetes`/`helm` provider call is made at all, so the
+connectivity problem above disappears with it.
+
+`deployment_id` and `registry_pull_token` must still be **real** in this mode —
+`registry_cache.tf` uses them as the upstream credentials. Only
+`installation_jwt` can be a placeholder, since nothing but the install consumes
+it.
+
+**Do not retype the chart values.** Terraform computes every GKE-derived value
+whether or not it installs, and these are the ones a human cannot reliably
+reproduce — a pull-through-cache endpoint, a storage service-account email, the
+scheduling that pairs with the pool taint:
+
+```bash
+terraform output -raw argocd_derived_values > values-derived.yaml
+```
+
+That emits `global.registry`, `toolsRegistryBase`, `registryAuth.mode`,
+`ingress.className`/`annotations`, `api.serviceAccount.annotations`,
+`supervisor.serviceAccount.annotations`, `controlPlane.nodeSelector`/
+`tolerations`, and — when Redis is bundled — `redis.master.nodeSelector`/
+`tolerations`, which `controlPlane.*` does not cover. Re-render it after any
+apply that changes the project, cluster name, cache repo, buckets or the taint
+toggle. Everything else in the Application is a value you already chose in
+`terraform.tfvars`.
+
+Two failure modes to know about this path:
+
+- **`secrets.provider` must be `existing`**, with `existingSecret` naming a
+  Secret you created yourself holding `JWT_SECRET`, `KMS_LOCAL_KEY` and
+  `SETUP_TOKEN`. Helm's `lookup()` never runs under ArgoCD, so `generated`
+  re-randomizes the first two on every sync — new JWT secret, and every stored
+  credential undecryptable. Seed `marshal-license` before the first sync too; a
+  blank one at bootstrap has broken the marketplace on a live cell.
+- **A wrong `supervisor.serviceAccount.annotations` is silent.** The supervisor
+  does the spaces-persistence blob I/O inside session pods, so a bad or missing
+  annotation 403s every object-storage call at session runtime while the api's
+  own storage connection test still passes. The only check that exercises it is
+  to launch a space, stop it, and resume it.
+
 ## Provisioning Cloud SQL yourself
 
 This repo deliberately does **not** create the Postgres instance — `database_url`
