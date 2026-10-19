@@ -86,7 +86,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.23.0-r6 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.23.0-r7 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -106,18 +106,26 @@ terraform {
     key          = "marshal/terraform.tfstate"
     region       = "eu-west-1"
     encrypt      = true
-    use_lockfile = true                     # needs Terraform >= 1.10
+    use_lockfile = true                     # Terraform >= 1.10 only; see below
   }
 }
 ```
 
-**On AWS this is required, not optional, if you use the bastion.** The install
-runs in two phases, the second from inside your network, and the two phases
-only share what they created through remote state. The bastion's IAM role is
-deliberately narrow: it can reach S3 buckets whose **name contains
-`tfstate`** and nothing else, so a bucket called `acme-terraform-state`
-will fail with AccessDenied from the bastion while working fine from your
-laptop.
+`use_lockfile` is S3's native state locking and needs **Terraform 1.10 or
+newer**. This installer only requires 1.5, so on 1.5 to 1.9 leave that line out
+and either accept no locking or add a `dynamodb_table`. The bastion the
+installer can create for you ships Terraform 1.13, so it is always fine there.
+
+**Use remote state, not a local file, for anything you intend to keep.** A local
+`terraform.tfstate` holds your licence token, your registry pull token and
+your database password in cleartext, and it exists only on the machine you ran
+the apply from, so nobody else can run the next upgrade.
+
+If you let the installer create a bastion (`create_bastion = true`), remote
+state is effectively required, and the bucket **name must contain
+`tfstate`**: the bastion's IAM role is deliberately narrow and can reach
+those buckets and nothing else, so `acme-terraform-state` fails with
+AccessDenied there while working fine from your laptop.
 
 Prefer to keep your variables in your own repository instead of in this clone?
 Point Terraform at them: `terraform apply -var-file=/path/to/your/prod.tfvars`.
@@ -161,4 +169,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.23.0`, published as `v0.23.0-r6`.
+Generated for Marshal chart version `0.23.0`, published as `v0.23.0-r7`.

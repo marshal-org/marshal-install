@@ -187,6 +187,11 @@ kubectl get pods -n marshal
 kubectl logs -n marshal -l app.kubernetes.io/component=api --tail=-1 | grep -i "license state"
 ```
 
+That licence line includes their `deployment_id` as a JSON field, so it lands in
+the terminal and in any scrollback they share. It is an identifier rather than a
+credential, but it is one of the four onboarding values, so do not paste the
+output into a ticket without trimming it.
+
 **`--tail=-1` is not optional.** With a label selector `kubectl logs` returns only the
 last 10 lines per pod, and the licence line sits near the top of a long log. Without it
 the command prints nothing on a correctly licensed install. That reads as a licensing
@@ -217,7 +222,11 @@ terraform apply
 #    finalizer away before terraform can revoke the load balancer controller's
 #    IAM policy, which is what otherwise deadlocks the destroy, and it lets the
 #    EBS CSI driver delete the PVC volumes while it still has permission to.
-kubectl delete namespace marshal      # under a minute; the EBS volumes go too
+# The chart owns two: the release namespace and "<release>-spaces", where
+#    session pods live. Deleting only the first leaves the second behind, which
+#    does not matter when step 4 destroys the cluster, and does matter on the
+#    reuse path (deploy_cluster = false) where the cluster outlives the destroy.
+kubectl delete namespace marshal marshal-spaces   # about a minute; EBS volumes go too
 
 # 4. Then destroy.
 terraform destroy
@@ -274,6 +283,20 @@ aws ec2 delete-security-group --group-id <id>
 aws ec2 delete-volume --volume-id <id>
 aws rds delete-db-snapshot --db-snapshot-identifier <name>
 ```
+
+## Warnings that are not problems
+
+- **`ipv6_association_id is deprecated` / `ipv6_cidr_block is deprecated`,
+  blamed on `cluster_private_access.tf`.** Every plan, apply and destroy prints
+  a few of these. Nothing on the line it names reads an IPv6 attribute: the
+  warning comes from the AWS provider's own `aws_vpc` data source, and the line
+  number is just where that data source is referenced. Harmless, nothing to
+  change, and do not let anyone edit a `.tf` file over it.
+- **`RESTARTS 1` on an api pod right after a fresh install.** The container
+  exits once during startup and recovers by itself. Seen on clean installs that
+  are otherwise perfect, with every pod `Running` and the licence `LICENSED`.
+  Tracked in marshal#1466. If it restarts more than once, or never reaches
+  `Running`, that is a different problem: read the log with `--previous`.
 
 ## When something fails
 

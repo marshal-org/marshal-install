@@ -98,9 +98,9 @@ variable "vpc_cidr" {
 }
 
 variable "availability_zones" {
-  description = "AZs to spread subnets/nodes across. Two is the cheapest EKS-legal minimum for a POC; add more for real HA."
+  description = "AZs to spread subnets/nodes across, when this flavor creates the network. Two is the cheapest EKS-legal minimum for a POC; add more for real HA. Empty (the default) takes the first two available AZs in var.region: the old default named eu-west-1 AZs, which is wrong in every other region and only shows up as an invalid-AZ error mid-apply."
   type        = list(string)
-  default     = ["eu-west-1a", "eu-west-1b"]
+  default     = []
 }
 
 variable "single_nat_gateway" {

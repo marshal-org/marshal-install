@@ -104,7 +104,10 @@ redis_mode = "bundled"
 # default; set it true only if your policy forbids a public endpoint even
 # briefly, and then the whole install runs on that bastion.
 # deploy_cluster = true
-# create_rds     = true   # provisions RDS for you — drop database_url above if set
+# create_rds     = true   # provisions RDS for you. DELETE the database_url line
+#                         # above if you set this: create_rds wins and a stale
+#                         # database_url is silently ignored, which is a
+#                         # confusing thing to leave in a file you keep.
 #
 # RDS sizing and safety. The defaults are a cheap POC database (db.t4g.micro,
 # 20GB, single-AZ, 1-day backups) with deletion protection and a final snapshot

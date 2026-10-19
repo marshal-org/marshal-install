@@ -224,7 +224,7 @@ output "_node_availability_zone_is_in_the_cluster" {
   value = null
   precondition {
     condition = var.node_availability_zone == "" || !var.deploy_cluster || contains(
-      var.create_network ? var.availability_zones : [for sn in local.private_subnets : sn.az],
+      var.create_network ? local.availability_zones_effective : [for sn in local.private_subnets : sn.az],
       var.node_availability_zone
     )
     error_message = "node_availability_zone must be an AZ the cluster actually has a private subnet in (availability_zones when this flavor creates the network, otherwise the AZs of your private_subnet_ids). Otherwise both node groups are created with an empty subnet list."

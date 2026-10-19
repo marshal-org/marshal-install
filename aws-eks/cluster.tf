@@ -14,6 +14,11 @@
 # the resources or the variables directly, so the two postures differ in
 # exactly one place.
 
+data "aws_availability_zones" "available" {
+  count = local.provision && var.create_network ? 1 : 0
+  state = "available"
+}
+
 locals {
   provision = var.deploy_cluster
 
@@ -42,8 +47,20 @@ locals {
     for s in local.private_subnets : s.id if s.az == var.node_availability_zone
   ] : local.private_subnet_ids
 
+  # AZs for a network this flavor creates. Derived from the region unless the
+  # operator names them, because a hardcoded default is wrong in every region
+  # but one. Only read on the create path; the reuse path takes the AZs of the
+  # subnets you brought.
+  az_names_in_region = sort(try(one(data.aws_availability_zones.available[*]).names, []))
+  availability_zones_effective = length(var.availability_zones) > 0 ? var.availability_zones : (
+    # Never slice a list that may be empty: on the reuse path the data source
+    # above is counted off, so this is [] and slice(x, 0, 2) would be an error
+    # rather than an empty result.
+    length(local.az_names_in_region) >= 2 ? slice(local.az_names_in_region, 0, 2) : local.az_names_in_region
+  )
+
   # AZ name -> index, used to derive per-AZ subnet CIDRs and NAT placement.
-  az_indices = { for idx, az in var.availability_zones : az => idx }
+  az_indices = { for idx, az in local.availability_zones_effective : az => idx }
 
   # Which AZ(s) get a NAT gateway: all of them (HA egress) or just the first
   # (single_nat_gateway=true, the cheaper POC default).
