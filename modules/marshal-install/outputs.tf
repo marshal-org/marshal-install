@@ -37,9 +37,10 @@ output "next_steps" {
     Marshal ${helm_release.marshal.version} installed as release "${helm_release.marshal.name}" in namespace "${var.namespace}".
 
     Verify:
+      aws eks update-kubeconfig --name <cluster> --region <region>   # kubectl needs this first
       kubectl get pods -n ${var.namespace}
       kubectl logs -n ${var.namespace} -l app.kubernetes.io/component=api -c migrate   # "migrations applied"
-      kubectl logs -n ${var.namespace} -l app.kubernetes.io/component=api | grep "license verified"
+      kubectl logs -n ${var.namespace} -l app.kubernetes.io/component=api --tail=-1 | grep "license state"
       kubectl port-forward -n ${var.namespace} svc/api 8080:8080 &
       curl -s localhost:8080/api/version
 

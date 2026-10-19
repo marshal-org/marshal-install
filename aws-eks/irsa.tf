@@ -74,7 +74,32 @@ resource "aws_eks_addon" "ebs_csi" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
-  depends_on = [aws_eks_node_group.spaces, aws_eks_node_group.control_plane]
+  # The addon creates a Service, and the AWS Load Balancer Controller registers
+  # a MUTATING WEBHOOK on every v1/Service in the cluster. helm_release reports
+  # "Creation complete" when the release is installed, not when its webhook pod
+  # has endpoints, so without this edge the addon's Service is admitted into a
+  # webhook that cannot answer yet and the addon lands in CREATE_FAILED:
+  #
+  #   AdmissionRequestDenied: failed calling webhook "mservice.elbv2.k8s.aws":
+  #   no endpoints available for service "aws-load-balancer-webhook-service"
+  #
+  # Confirmed live on a cold install: a single terraform apply exited 1 with
+  # 37 of 38 resources created, leaving no metrics.k8s.io at all, so kubectl
+  # top and every CPU or memory HPA in the cluster were dead while every pod
+  # looked healthy. It is a race, so it does not reproduce reliably, which is
+  # exactly why the edge belongs here rather than in a troubleshooting note.
+  depends_on = [
+    aws_eks_node_group.spaces,
+    aws_eks_node_group.control_plane,
+    helm_release.aws_load_balancer_controller,
+    # Same shape as the attachment edge on the controller release below, and for
+    # the same reason: nothing references this attachment, so terraform is free
+    # to destroy it first. The driver is what deletes a PVC's EBS volume, and it
+    # needs ec2:DeleteVolume at that moment. Hardening, not a failure we have
+    # reproduced: in the documented teardown the namespace goes before the
+    # destroy starts, so the driver still holds its policy when the volumes go.
+    aws_iam_role_policy_attachment.ebs_csi,
+  ]
 }
 
 # Installing the EBS CSI driver addon is NOT enough by itself — confirmed
@@ -125,7 +150,25 @@ resource "aws_eks_addon" "metrics_server" {
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 
-  depends_on = [aws_eks_node_group.spaces, aws_eks_node_group.control_plane]
+  # The addon creates a Service, and the AWS Load Balancer Controller registers
+  # a MUTATING WEBHOOK on every v1/Service in the cluster. helm_release reports
+  # "Creation complete" when the release is installed, not when its webhook pod
+  # has endpoints, so without this edge the addon's Service is admitted into a
+  # webhook that cannot answer yet and the addon lands in CREATE_FAILED:
+  #
+  #   AdmissionRequestDenied: failed calling webhook "mservice.elbv2.k8s.aws":
+  #   no endpoints available for service "aws-load-balancer-webhook-service"
+  #
+  # Confirmed live on a cold install: a single terraform apply exited 1 with
+  # 37 of 38 resources created, leaving no metrics.k8s.io at all, so kubectl
+  # top and every CPU or memory HPA in the cluster were dead while every pod
+  # looked healthy. It is a race, so it does not reproduce reliably, which is
+  # exactly why the edge belongs here rather than in a troubleshooting note.
+  depends_on = [
+    aws_eks_node_group.spaces,
+    aws_eks_node_group.control_plane,
+    helm_release.aws_load_balancer_controller,
+  ]
 }
 
 # ── AWS Load Balancer Controller (NOT an EKS-managed addon — must be Helm-
@@ -246,5 +289,19 @@ resource "helm_release" "aws_load_balancer_controller" {
     # it first and then could not delete what was left, failing the destroy
     # with `dial tcp <endpoint>:443: i/o timeout`.
     aws_security_group_rule.cluster_private_access,
+    # Destroyed AFTER this release, for the same reason as the routes above and
+    # by a different mechanism. Nothing references this attachment, so without
+    # the edge terraform destroyed it in the first second, in parallel with
+    # `helm uninstall marshal`. The controller kept running but lost the
+    # permissions its finalizer needs:
+    #
+    #   api error UnauthorizedOperation: You are not authorized to perform this
+    #   operation ... is not authorized to perform: ec2:DescribeSecurityGroups
+    #
+    # so the ingress.k8s.aws/resources finalizer never cleared, the uninstall
+    # blocked forever, and terraform printed no error at all: just
+    # `Still destroying... [id=marshal, 10m50s elapsed]` while the cluster, both
+    # node groups and the database stayed up and billing.
+    aws_iam_role_policy_attachment.alb_controller,
   ]
 }

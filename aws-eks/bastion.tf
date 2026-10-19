@@ -7,10 +7,10 @@
 # deploy_cluster=true && create_bastion (default FALSE: only when there is no
 # other path into the VPC, and then it is the machine you install FROM).
 #
-# Apply workflow once this exists: ship a `deploy` checkout to the bastion
-# (e.g. via S3 — the bastion has NAT egress) and run terraform ON it, the same
-# pattern the GCP flavor's installs use. The bastion is deliberately NOT given
-# a GitHub credential, so ship the checkout rather than cloning it there.
+# Apply workflow once this exists: run the WHOLE install on the bastion. It has
+# git and NAT egress, so it clones this installer itself and no files are shipped
+# between machines. Do not split the install across two hosts: they share nothing
+# but the Terraform state, and the hand-off is where installs go wrong.
 # Session Manager gives an interactive shell (`aws ssm start-session --target <instance-id>`) with no
 # SSH key to manage.
 

@@ -97,8 +97,8 @@ provider "helm" {
   # fails it. Confirmed live. One consequence worth knowing: a local-path chart
   # or a credential-free cache still needs a working token to get through plan.
   #
-  # STATIC block, not `dynamic "registry"` — deploy/CLAUDE.md documents a real
-  # bug (found on gcp-gke's first live customer deploy) where a conditional
+  # STATIC block, not `dynamic "registry"` — there is a real, reproduced bug
+  # (found on the gcp-gke flavor's first live install) where a conditional
   # `dynamic` block inside a `provider {}` block fails at plan/apply time
   # ("Cannot use a for_each value... An iterable collection is required"),
   # regardless of collection type, and `terraform validate` never catches it —

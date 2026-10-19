@@ -76,17 +76,17 @@ for you automatically:
   enforced by an output precondition, which actually halts `plan`; a `check`
   block would only warn) only if you deliberately want a public,
   CIDR-restricted endpoint instead.
-- **A bastion** (`create_bastion`, default `true` whenever provisioning) — a
+- **A bastion** (`create_bastion`, default `false`) — a
   small EC2 instance with **no public IP and no open inbound ports at all**,
   reachable only via AWS Systems Manager Session Manager
   (`aws ssm start-session --target <instance-id>`, IAM-authenticated, no SSH
-  key to manage) — the AWS-native equivalent of `gcp-gke`'s IAP-tunneled
-  bastion. **Terraform/kubectl/helm must run FROM the bastion** once the
-  cluster's API endpoint is private-only: ship a `deploy` checkout to it (e.g.
-  via S3 — the bastion has NAT egress) the same way the GCP flavor's installs
-  do. Note the bastion is NOT assumed to have a GitHub credential, so ship the
-  checkout rather than cloning it there. Set `create_bastion = false`
-  if you already have VPN/peering/Direct Connect into this VPC instead.
+  key to manage). It is a fallback, not the normal path: the installer opens the
+  Kubernetes API endpoint to the VPC's own CIDR (`cluster_private_access_cidrs`),
+  so the whole install runs as one `terraform apply` from anywhere that can
+  already route into the VPC — a VPN, a zero-trust connector, a jump host. Build
+  a bastion only if your policy allows none of those, and then run the whole
+  install on it: it has git and NAT egress, so it clones this installer itself
+  and nothing is shipped between machines.
 - **Two node groups** — `spaces` (session/space workloads, default
   `m5.xlarge`) and `control_plane` (api/gateway/web/marketplace/redis only,
   default `m5.2xlarge` — **not smaller**: the chart's own baseline already
@@ -112,7 +112,11 @@ for you automatically:
   `rds_deletion_protection` is **true** and `rds_skip_final_snapshot` is
   **false**, because this database holds the envelope-encrypted credential
   store and the audit trail, and both knobs cost nothing. The consequence is
-  deliberate: `terraform destroy` refuses until the operator turns them off.
+  deliberate, and the two behave differently: `terraform destroy` **refuses**
+  while `rds_deletion_protection` is true, whereas `rds_skip_final_snapshot`
+  refuses nothing and simply leaves a `<cluster_name>-postgres-final` snapshot
+  behind. Both must be changed **and applied** before a destroy, because the
+  destroy reads them from state rather than from tfvars.
   **This is new surface area beyond `gcp-gke` parity** — `gcp-gke` has never provisioned
   Cloud SQL itself (confirmed: zero `google_sql_*` resources anywhere in that
   flavor's history); `create_rds` was added deliberately for a from-scratch
@@ -121,7 +125,7 @@ for you automatically:
 ## TLS: where the certificate comes from
 
 The ALB terminates TLS with an **ACM certificate and nothing else** (see
-`alb_tls.tf`'s header for the live proof, and why `tls_mode="self_signed"`
+`alb_tls.tf`'s header for the live proof, and why `tls_mode="self_signed"` once
 alone means HTTP-only on this flavor specifically). Three real-certificate
 paths, mutually exclusive, both postures:
 

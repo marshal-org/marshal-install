@@ -91,7 +91,7 @@ network. Do not pass `--cluster-name` unless they are reusing a cluster: the
 | `kubernetes.io/role/internal-elb absent` | Either let `tag_existing_subnets` add it, or they add it. Without it the Ingress never gets an address **and emits no events**, which is slow to diagnose. |
 | `only N free IPs` | Every pod takes a real subnet IP, so this caps concurrent sessions. Under about 60, ask for a bigger subnet now. |
 | `AZ coverage: 1 AZ` | EKS will not create a cluster. Get a second subnet. |
-| `on-demand vCPU quota` low | A quota increase can take days. Start it immediately. |
+| `on-demand vCPU quota` low | A quota increase can take days. Start it immediately. The default shape needs **12 vCPU** (one `m5.xlarge` node plus one `m5.2xlarge` control-plane node). 32 is comfortable; 16 gets tight as soon as a second node scales up. |
 
 A clean preflight proves the environment, not their permissions. Say so.
 
@@ -174,9 +174,19 @@ state, and the hand-off is where installs go wrong.
 
 ```bash
 terraform output next_steps
+
+# kubectl has no cluster yet. Without this it talks to localhost:8080 and the
+# whole verify step looks like a broken install.
+aws eks update-kubeconfig --name <cluster_name> --region <region>
+
 kubectl get pods -n marshal
-kubectl logs -n marshal -l app.kubernetes.io/component=api | grep -i license
+kubectl logs -n marshal -l app.kubernetes.io/component=api --tail=-1 | grep -i "license state"
 ```
+
+**`--tail=-1` is not optional.** With a label selector `kubectl logs` returns only the
+last 10 lines per pod, and the licence line sits near the top of a long log. Without it
+the command prints nothing on a correctly licensed install. That reads as a licensing
+failure and is the likeliest reason a customer calls you after a successful install.
 
 Expect every pod `Running` and a line reporting the licence state as
 `LICENSED`. Then point them at their hostname. The certificate is a self-signed
@@ -185,35 +195,68 @@ expected, not a fault: see the TLS section of their cloud's page.
 
 ## 6. Tearing one down
 
-`terraform destroy` is not the whole job, and the order matters.
+`terraform destroy` on its own does not do it, and the order is not optional.
+Run it in the wrong order and the destroy **deadlocks with no error message at
+all**, leaving the cluster and the database up and billing.
 
 ```bash
-# 1. in terraform.tfvars, then apply: an in-place RDS change, fast
+# 1. Delete the workload FIRST. This is not tidiness. It removes the Ingress and
+#    its finalizer before terraform can revoke the load balancer controller's
+#    IAM policy, which is what otherwise deadlocks the destroy. It also lets the
+#    EBS CSI driver delete the PVC volumes while it still has permission to.
+kubectl delete namespace marshal      # about 15s; the EBS volumes go with it
+
+# 2. Turn off BOTH database guardrails, in terraform.tfvars:
 rds_deletion_protection = false
+rds_skip_final_snapshot = true        # leave this out to KEEP a final snapshot
+
+# 3. Apply them. Setting them is not enough on its own: `terraform destroy`
+#    reads both values out of STATE, not out of your tfvars, so a flag that has
+#    never been through an apply has no effect and you get the snapshot anyway.
 terraform apply
+
+# 4. Now it can run.
 terraform destroy
 ```
 
-Flipping protection **after** starting the destroy does not work. The destroy
-tears down the cluster first and only then fails on the database, leaving a
-database with nothing around it.
+Step 3 is normally a quick in-place database change. On a cluster whose install
+failed partway it can also replace a tainted addon, so read the plan instead of
+assuming.
 
-Two things outlive the destroy, because Terraform never owned them:
+**What outlives the destroy**, because Terraform never owned any of it:
 
-- **The final RDS snapshot**, `<cluster_name>-postgres-final`. Keep it if the
-  data matters. It also blocks a rebuild under the same cluster name, since the
-  snapshot name would collide.
-- **EBS volumes from Kubernetes PersistentVolumeClaims.** The EBS CSI driver
-  created them, not Terraform, so they survive as unattached volumes and keep
-  billing. Find them by tag:
+- **A final RDS snapshot**, `<cluster_name>-postgres-final`, unless you skipped it
+  in step 2. Keep it if the data matters. It also blocks a rebuild under the same
+  cluster name, because the snapshot name collides.
+- **EBS volumes from PersistentVolumeClaims**, if you skipped step 1.
+- **The load balancer, its target groups, and any security group the controller
+  created**, if the controller lost its IAM policy before it finished its own
+  cleanup. Step 1 prevents this as well.
+
+Find all of it:
 
 ```bash
 aws ec2 describe-volumes --region <region> \
   --filters Name=tag:KubernetesCluster,Values=<cluster_name> \
   --query 'Volumes[].VolumeId' --output text
+aws elbv2 describe-target-groups --region <region> \
+  --query 'TargetGroups[?starts_with(TargetGroupName, `k8s-marshal`)].TargetGroupArn' --output text
+aws ec2 describe-security-groups --region <region> \
+  --filters Name=tag:elbv2.k8s.aws/cluster,Values=<cluster_name> \
+  --query 'SecurityGroups[].GroupId' --output text
+aws rds describe-db-snapshots --region <region> --snapshot-type manual \
+  --query 'DBSnapshots[].DBSnapshotIdentifier' --output text
 ```
 
-Delete the namespace before the destroy and the CSI driver removes them for you.
+Then remove whatever they return, in this order, because a security group cannot
+go while a target group still references it:
+
+```bash
+aws elbv2 delete-target-group --target-group-arn <arn>
+aws ec2 delete-security-group --group-id <id>
+aws ec2 delete-volume --volume-id <id>
+aws rds delete-db-snapshot --db-snapshot-identifier <name>
+```
 
 ## When something fails
 
@@ -230,9 +273,37 @@ Delete the namespace before the destroy and the CSI driver removes them for you.
 - **The load balancer answers 502 while pods are healthy.** A health check is
   pointing at a path that returns 404. Compare the target group's health check
   path with what the service actually serves.
+- **An EKS addon is `CREATE_FAILED` and the apply exits 1.** Read the message: if it
+  names a webhook with `no endpoints available`, the addon raced the AWS Load Balancer
+  Controller's Service webhook. A plain `terraform apply` again fixes it, and the
+  warning Terraform prints about purging the addon's configuration is harmless here,
+  because the addon never finished being created and carries no configuration to lose.
 - **`terraform destroy` fails on the database.** Deletion protection is on by
   design. Set `rds_deletion_protection = false`, apply that, then destroy.
   Doing it in the other order tears down everything else first and then stops.
+- **`terraform destroy` prints `Still destroying...` forever and never errors.**
+  It is waiting on `helm_release.marshal`, which is waiting on the Ingress's
+  `ingress.k8s.aws/resources` finalizer, which is waiting on a load balancer
+  controller that no longer has the IAM policy terraform just revoked. Confirm
+  with `helm list -n marshal --all` (`uninstalling`) and a 403 in
+  `kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller`.
+  It will not resolve on its own. To get out:
+  1. `Ctrl-C` is not enough. Graceful shutdown waits for the in-flight call, and
+     the in-flight call is the one that never returns. Kill the terraform process.
+  2. That strands a lock. Read the ID out of the `.tflock` object next to your
+     state and `terraform force-unlock <id>`.
+  3. `terraform apply`. **It will exit 1** on `"marshal" has no deployed
+     releases`, because the helm provider will not touch a release stuck in
+     `uninstalling`. Let it. It restores the IAM policy before it fails, and that
+     is the part you need.
+  4. `kubectl rollout restart deployment/aws-load-balancer-controller -n kube-system`.
+     Without this the controller is in exponential backoff and can sit silent for
+     fifteen minutes or more, with nothing in its log to say so. After the restart
+     the finalizer clears in seconds.
+  5. Then start section 6 again, from step 1.
+
+  Installers from `v0.23.0-r3` onward do not have this failure: the controller's
+  policy attachment is now destroyed after the release rather than beside it.
 
 Full list: https://docs.marshal.codes/troubleshooting
 
