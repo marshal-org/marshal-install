@@ -20,7 +20,11 @@ Four values, issued once per deployment by their Marshal contact:
 without them:
 
 ```bash
-helm registry login registry.marshal.codes --username <deployment_id> --password '<registry_pull_token>'
+# Read the token in rather than passing it on the command line: --password puts
+# it in shell history, and helm itself warns about it.
+read -rs MRPT            # paste the mrpt_ token, then Enter. Nothing is echoed.
+printf '%s' "$MRPT" | helm registry login registry.marshal.codes \
+  --username <deployment_id> --password-stdin
 helm pull oci://registry.marshal.codes/marshal-charts/marshal --version <chart_version>
 ```
 
@@ -343,11 +347,11 @@ aws rds delete-db-snapshot --db-snapshot-identifier <name>
 - **`ipv6_association_id is deprecated` / `ipv6_cidr_block is deprecated`,
   blamed on `cluster_private_access.tf`.** May appear on a plan or an apply, and
   may not: one live run saw three per plan and apply and none on the destroy,
-  another on the same provider version saw none at all. Either way it is
-  harmless. Nothing on the line it names reads an IPv6 attribute: the
-  warning comes from the AWS provider's own `aws_vpc` data source, and the line
-  number is just where that data source is referenced. Harmless, nothing to
-  change, and do not let anyone edit a `.tf` file over it.
+  another on the same provider version saw none at all. Nothing on the line it
+  names reads an IPv6 attribute: the warning comes from the AWS provider's own
+  `aws_vpc` data source, and the line number is just where that data source is
+  referenced. Harmless either way, nothing to change, and do not let anyone
+  edit a `.tf` file over it.
 - **`RESTARTS 1` on an api pod right after a fresh install.** The container
   exits once during startup and recovers by itself. Seen on clean installs that
   are otherwise perfect, with every pod `Running` and the licence `LICENSED`.

@@ -45,13 +45,18 @@ variable "deploy_cluster" {
 
 
 # ── Networking (only used when deploy_cluster = true) ────────────────────────
-# Marshal runs on your internal network — nodes are private (no public IPs),
-# egress goes through a NAT gateway. UNLIKE gcp-gke's private-endpoint-by-
-# default posture, the cluster's API endpoint defaults to PUBLIC (locked to
-# cluster_endpoint_public_access_cidrs) — deliberately, because provisioning
-# and installing happen in the SAME apply and there's often no pre-existing
-# VPN/bastion into a brand-new AWS account yet. Flip cluster_endpoint_public_
-# access to false once you have private access sorted (VPN/bastion/peering).
+# Marshal runs on your internal network: nodes are private (no public IPs) and
+# egress goes through a NAT gateway. The cluster's API endpoint is PRIVATE by
+# default (cluster_endpoint_public_access defaults to false), matching gcp-gke.
+#
+# That means the machine running the apply has to be able to reach inside the
+# VPC. There are three ways, and the install-marshal skill's section 1 lays
+# them out: an existing route in (Twingate, Tailscale, Direct Connect, a
+# transit gateway, a jump host), a temporary public endpoint locked to your own
+# address, or the bastion this flavor can create. If you take the public-
+# endpoint route, read that section before you narrow it again: from outside
+# the VPC, making the endpoint private is a one-way door that locks terraform
+# out of its own state.
 
 variable "create_network" {
   description = "true (default) = create a dedicated VPC + public/private subnets (one pair per AZ) + a NAT gateway. false = reuse a VPC you already run, by setting vpc_id + private_subnet_ids (+ public_subnet_ids for an internet-facing load balancer). The cluster, nodes, bastion and RDS are still created by this flavor; only the network is yours."
