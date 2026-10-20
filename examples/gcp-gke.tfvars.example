@@ -23,7 +23,7 @@ deployment_id       = "dep_ab12cd"
 registry_pull_token = "mrpt_9f3c…"
 
 # ── Product version + routing ────────────────────────────────────────────────
-chart_version = "0.23.0" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.25.0" # the version this installer was published for; confirm against your onboarding
 ingress_host  = "marshal.acme.com"
 
 # ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
