@@ -163,6 +163,46 @@ cert-manager for TLS instead of `tls_mode`? Set `internal_ingress = false`,
 escape hatch — always wins over `tls_mode`) with a cert-manager issuer
 annotation.
 
+### Google-managed certificate: `ingress_mode = "gateway"` (chart ≥ 0.27.0)
+
+A GKE Ingress on an internal load balancer cannot use a Google-managed
+certificate. A Gateway can. `ingress_mode = "gateway"` exposes Marshal through a
+Gateway API Gateway (class `gateway_class_name`, default `gke-l7-rilb`) instead
+of the Ingress, on the same reserved internal IP, with the same host, extra
+hosts and preview domain. Google then issues and renews the certificate; nothing
+in the cluster rotates it.
+
+```hcl
+ingress_mode               = "gateway"
+create_managed_certificate = true   # ingress_host + *.preview_domain, DNS-authorized
+```
+
+1. `terraform apply`. It turns on the Gateway API on a cluster this flavor
+   provisions, and creates the Gateway, the DNS authorizations and the
+   certificate. HTTPS serves the `tls_mode` certificate meanwhile.
+2. Add each record from `terraform output managed_certificate_dns_records`
+   (CNAME) in your DNS.
+3. Wait until the certificate is `ACTIVE`
+   (`gcloud certificate-manager certificates describe <cluster_name>-marshal-cert --location <region>`),
+   then `terraform apply` again. That apply reads the new state and moves the
+   HTTPS listener onto the managed certificate; `managed_certificate_state`
+   then reads `ACTIVE`.
+
+Notes:
+
+- Needs `internal_ingress = true` and the `certificatemanager.googleapis.com`
+  API on the project (`gcloud services enable certificatemanager.googleapis.com`).
+- Reused cluster (`deploy_cluster = false`): turn the Gateway API on yourself
+  first: `gcloud container clusters update <name> --location <loc> --gateway-api=standard`.
+- Already have a Certificate Manager certificate? List it in
+  `gateway_certificate_names` (same project and region) instead of, or as well
+  as, `create_managed_certificate`.
+- `extra_ingress_hosts` (e.g. a MagicDNS name) are routed but not on the managed
+  certificate.
+- Switching an existing install from `ingress` to `gateway` moves the load
+  balancer: expect up to about four minutes without traffic, on the same IP and
+  DNS name. Plan it in a quiet window.
+
 ## Node pools: control-plane vs. spaces_pools (isolated by default, taint gated)
 
 Session/space workloads run across however many pools `spaces_pools` (a map,
@@ -525,16 +565,22 @@ at runtime. `terraform output audit_persistence_bucket` /
 `spaces_persistence_bucket` prints the `gs://` URLs (`null` for whichever one
 you left off).
 
-**Creating a bucket doesn't turn its feature on by itself** — an org admin
-still wires the actual URL via the API afterward (audit: per-org config;
-spaces: `PUT /api/org/space-storage`, `provider=gcs`, `bucket=<name>`, no
-`credentials` needed since Workload Identity handles auth ambiently). This
-just provisions the storage + access so that Day-2 step has somewhere to
-point at.
+Turn on both unless there is a reason not to: without the spaces bucket,
+spaces cannot be forked or archived and keep their files across stop/resume
+only on a compute size with a persistent disk, and without the audit bucket
+the audit log is never exported.
 
-Leave both `false` (default) to bring your own buckets — have the org admin
-supply explicit credentials via the API instead of relying on Workload
-Identity.
+**Creating a bucket doesn't turn its feature on by itself.** After install an
+owner or admin of each org connects it in **Settings > Space Storage** and
+**Settings > Auditing** (Storage card → **Save & enable**): provider Google
+Cloud Storage, the bucket name without `gs://`, and empty credential fields,
+since Workload Identity authenticates. Then stop and resume a space: the
+Settings connection test runs in the api pod, so only a real session proves the
+supervisor's binding.
+
+Leave both `false` (default) to bring your own buckets — the org admin then
+enters the bucket's credentials in the same Settings pages instead of relying
+on Workload Identity.
 
 ## Day-2 upgrade
 

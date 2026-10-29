@@ -28,7 +28,7 @@ deployment_id       = "dep_ab12cd"
 registry_pull_token = "mrpt_9f3c…"
 
 # ── Product version + routing ────────────────────────────────────────────────
-chart_version = "0.25.0" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.27.0" # the version this installer was published for; confirm against your onboarding
 ingress_host  = "marshal.acme.com"
 
 # ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
@@ -80,6 +80,18 @@ redis_mode = "bundled"
 #     reused across every install, not provisioned here:
 # image_cache_registry = "harbor.acme.internal/marshal"
 # registry_auth_mode   = "none"   # or "workloadIdentity" (IRSA) if the cache needs auth
+
+# ── Object storage — recommended: turn on both ──────────────────────────────
+# Both default to false. Without the spaces bucket, spaces cannot be forked or
+# archived, and keep files across stop/resume only on a persistent-disk size; without the audit bucket, the audit log is never
+# exported. Access is keyless (a <cluster_name>-storage-role via IRSA). Created
+# only with deploy_cluster = true; on a reused cluster bring your own bucket and
+# role via api_service_account_annotations and
+# supervisor_service_account_annotations. After install an owner or admin
+# connects each bucket in Settings > Space Storage / Settings > Auditing.
+# See aws-eks/README.md.
+# create_spaces_persistence_bucket = true
+# create_audit_persistence_bucket  = true
 
 # ── Session port-previews (optional) ─────────────────────────────────────────
 # preview_domain = "preview.acme.com"

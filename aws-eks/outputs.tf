@@ -33,7 +33,7 @@ output "next_steps" {
 
 # ── ACM (only populated when this flavor requested the certificate) ──────────
 output "acm_validation_records" {
-  description = "DNS records that prove you own the hostnames, for the manual-DNS path. Add each one in whatever DNS you run, wait for the status below to read ISSUED, then apply again to turn HTTPS on. Empty when acm_request_certificate=false or when Route53 created them for you."
+  description = "DNS records that prove you own the hostnames, for the manual-DNS path. Includes the preview wildcard (*.preview_domain) when preview_domain is set; a wildcard and its parent domain can share one record name. Add each one in whatever DNS you run, wait for the status below to read ISSUED, then apply again to turn HTTPS on. Empty when acm_request_certificate=false or when Route53 created them for you."
   value = var.acm_request_certificate && var.acm_validation_route53_zone_id == "" ? [
     for dvo in aws_acm_certificate.requested[0].domain_validation_options : {
       domain = dvo.domain_name
@@ -51,5 +51,5 @@ output "acm_certificate_arn" {
 
 output "acm_certificate_status" {
   description = "ACM status of a certificate this flavor requested (PENDING_VALIDATION until the records resolve). null otherwise."
-  value       = try(local.requested_cert.status, null)
+  value       = try(local.requested_cert_status, null)
 }

@@ -105,6 +105,20 @@ locals {
       length(var.extra_ingress_hosts) > 0 ? { extraHosts = var.extra_ingress_hosts } : {},
       var.preview_domain == "" ? {} : { preview = { domain = var.preview_domain, scheme = var.preview_scheme } },
       length(local.effective_ingress_tls) > 0 ? { tls = local.effective_ingress_tls } : {},
+      # Only set in gateway mode, so the values an "ingress" install sends are
+      # byte-identical to before (and still valid for charts older than 0.27.0).
+      # One attribute per conditional: a two-attribute object and {} have no
+      # common type, and validate does not catch it, only plan does.
+      var.ingress_mode == "gateway" ? { mode = "gateway" } : {},
+      var.ingress_mode == "gateway" ? {
+        gateway = merge(
+          { healthCheckPolicy = var.gateway.health_check_policy },
+          var.gateway.class_name == "" ? {} : { className = var.gateway.class_name },
+          length(var.gateway.annotations) > 0 ? { annotations = var.gateway.annotations } : {},
+          length(var.gateway.addresses) > 0 ? { addresses = var.gateway.addresses } : {},
+          length(var.gateway.cert_manager_certs) > 0 ? { certManagerCerts = var.gateway.cert_manager_certs } : {},
+        )
+      } : {},
     )
   }
 

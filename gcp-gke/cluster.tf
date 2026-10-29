@@ -182,6 +182,16 @@ resource "google_container_cluster" "this" {
   release_channel {
     channel = var.release_channel
   }
+
+  # The Gateway CRDs and GatewayClasses (gke-l7-rilb, ...) exist only with the
+  # Gateway API turned on. Only in gateway mode, so ingress installs plan no
+  # change to their cluster.
+  dynamic "gateway_api_config" {
+    for_each = var.ingress_mode == "gateway" ? ["standard"] : []
+    content {
+      channel = "CHANNEL_STANDARD"
+    }
+  }
   min_master_version  = var.kubernetes_version
   deletion_protection = var.deletion_protection
 

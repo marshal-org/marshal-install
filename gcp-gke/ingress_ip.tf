@@ -18,7 +18,9 @@
 # duplicate. New installs need none of this — nothing pre-exists to conflict.
 
 locals {
-  needs_static_ip = var.internal_ingress && var.tls_mode != "none"
+  # Gateway mode (gateway.tf) always pins the Gateway to this address, so the
+  # IP and DNS stay put across applies and when switching from the Ingress.
+  needs_static_ip = var.internal_ingress && (var.tls_mode != "none" || var.ingress_mode == "gateway")
 }
 
 resource "google_compute_address" "ingress" {

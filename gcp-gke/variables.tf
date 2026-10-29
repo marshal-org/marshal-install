@@ -456,6 +456,35 @@ variable "ingress_static_ip_name" {
   default     = "marshal-ingress-ip"
 }
 
+variable "ingress_mode" {
+  description = "\"ingress\" (default) = GKE Ingress (class gce-internal), as before. \"gateway\" = a Gateway API Gateway (class gateway_class_name) instead, which is what lets an INTERNAL load balancer use a Google-managed, auto-renewing certificate (see create_managed_certificate). Needs chart_version >= 0.27.0 and internal_ingress = true. Switching an existing install moves the load balancer: expect a few minutes without traffic on the same IP and DNS name. See gateway.tf."
+  type        = string
+  default     = "ingress"
+
+  validation {
+    condition     = contains(["ingress", "gateway"], var.ingress_mode)
+    error_message = "ingress_mode must be \"ingress\" or \"gateway\"."
+  }
+}
+
+variable "gateway_class_name" {
+  description = "GatewayClass when ingress_mode = \"gateway\". \"gke-l7-rilb\" (default) = regional internal Application Load Balancer, reachable only inside your VPC."
+  type        = string
+  default     = "gke-l7-rilb"
+}
+
+variable "create_managed_certificate" {
+  description = "ingress_mode = \"gateway\" only. true = create a Google-managed Certificate Manager certificate (regional, DNS-authorized) for ingress_host and, when set, *.preview_domain. Google issues and renews it. After the first apply, add the CNAME records from the managed_certificate_dns_records output, wait for managed_certificate_state = ACTIVE, then apply again: that apply moves HTTPS onto the managed certificate. Until then HTTPS serves the tls_mode certificate. extra_ingress_hosts are not on it. Needs the certificatemanager.googleapis.com API."
+  type        = bool
+  default     = false
+}
+
+variable "gateway_certificate_names" {
+  description = "ingress_mode = \"gateway\" only. Certificate Manager certificates you already have (names, same project and region) for the HTTPS listener. Used together with the one create_managed_certificate makes. Empty (default) = HTTPS uses the tls_mode certificate."
+  type        = list(string)
+  default     = []
+}
+
 variable "preview_domain" {
   description = "Wildcard host for session port-previews, e.g. \"preview.acme.com\". \"\" disables previews."
   type        = string

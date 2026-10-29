@@ -253,6 +253,39 @@ variable "ingress_annotations" {
   default     = {}
 }
 
+variable "ingress_mode" {
+  description = "What exposes the app. \"ingress\" (default) renders a Kubernetes Ingress, as every install did before chart 0.27.0. \"gateway\" renders a Gateway API Gateway + HTTPRoutes INSTEAD (chart ingress.mode, chart >= 0.27.0), configured by var.gateway; ingress_class_name and ingress_annotations do not apply in that mode. Host, extra hosts, preview and TLS settings apply in both."
+  type        = string
+  default     = "ingress"
+  nullable    = false
+
+  validation {
+    condition     = contains(["ingress", "gateway"], var.ingress_mode)
+    error_message = "ingress_mode must be \"ingress\" or \"gateway\"."
+  }
+}
+
+variable "gateway" {
+  description = <<-EOT
+    Gateway settings, used only when ingress_mode = "gateway" (chart ingress.gateway.*):
+      class_name          — GatewayClass. "" keeps the chart default (gke-l7-rilb, GKE regional internal).
+      annotations         — extra annotations on the Gateway.
+      addresses           — pin the Gateway to reserved IPs, e.g. [{ type = "NamedAddress", value = "marshal-ingress-ip" }].
+      cert_manager_certs  — GKE Certificate Manager certificate names for the HTTPS listener. When non-empty they
+                            win over the TLS Secret from tls_mode; when empty the listener uses that Secret.
+      health_check_policy — GKE HealthCheckPolicy per backend (copies the readiness probes). false on a non-GKE Gateway.
+  EOT
+  type = object({
+    class_name          = optional(string, "")
+    annotations         = optional(map(string), {})
+    addresses           = optional(list(object({ type = string, value = string })), [])
+    cert_manager_certs  = optional(list(string), [])
+    health_check_policy = optional(bool, true)
+  })
+  default  = {}
+  nullable = false
+}
+
 variable "extra_ingress_hosts" {
   description = "Extra hostnames routed to the same api/gateway/web backends as ingress_host, each on its own rule on the SAME Ingress object — e.g. a Tailscale MagicDNS name alongside the primary public DNS name. Each entry needs its own DNS record pointing at the Ingress/LB. TLS: tls_mode=\"self_signed\"/\"inline\" fold these into the cert's SAN list automatically (see tls.tf); tls_mode=\"secret\" requires the caller's own Secret to already cover them; the aws-eks flavor's ACM cert (alb_tls.tf) only auto-covers these for tls_mode=\"self_signed\" — bring your own SANs for \"inline\" there."
   type        = list(string)

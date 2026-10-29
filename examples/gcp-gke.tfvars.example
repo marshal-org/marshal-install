@@ -23,7 +23,7 @@ deployment_id       = "dep_ab12cd"
 registry_pull_token = "mrpt_9f3c…"
 
 # ── Product version + routing ────────────────────────────────────────────────
-chart_version = "0.25.0" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.27.0" # the version this installer was published for; confirm against your onboarding
 ingress_host  = "marshal.acme.com"
 
 # ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
@@ -39,11 +39,11 @@ redis_mode = "bundled"
 # ── Ingress / TLS ────────────────────────────────────────────────────────────
 # Marshal is internal-only by default (internal LB, IngressClass gce-internal).
 # internal_ingress = true   # default; set false to expose via an external GCLB
-# GKE-native internal static IP + managed cert:
-# ingress_annotations = {
-#   "kubernetes.io/ingress.regional-static-ip-name" = "marshal-ip"
-#   "networking.gke.io/managed-certificates"        = "marshal-cert"
-# }
+# The internal static IP is reserved and wired for you (create_ingress_static_ip).
+# Google-managed, auto-renewing certificate (chart >= 0.27.0): serve through a
+# Gateway instead of the Ingress. See README "Google-managed certificate".
+# ingress_mode               = "gateway"
+# create_managed_certificate = true
 # Or bring your own TLS Secret:
 # ingress_tls = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]
 
@@ -51,6 +51,15 @@ redis_mode = "bundled"
 # Recommended at scale — mirror through a GCP AR remote repo + Workload Identity:
 # registry           = "europe-west1-docker.pkg.dev/acme-prod/marshal-cache/marshal"
 # registry_auth_mode = "workloadIdentity"
+
+# ── Object storage — recommended: turn on both ──────────────────────────────
+# Both default to false. Without the spaces bucket, spaces cannot be forked or
+# archived, and keep files across stop/resume only on a persistent-disk size; without the audit bucket, the audit log is never
+# exported. Access is keyless (a <cluster_name>-storage GSA via Workload
+# Identity). After install an owner or admin connects each bucket in
+# Settings > Space Storage / Settings > Auditing. See gcp-gke/README.md.
+# create_spaces_persistence_bucket = true
+# create_audit_persistence_bucket  = true
 
 # ── Session port-previews (optional) ─────────────────────────────────────────
 # preview_domain = "preview.acme.com"

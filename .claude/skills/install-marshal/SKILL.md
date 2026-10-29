@@ -157,6 +157,61 @@ their state belong in their own repository and their own backend: both contain
 their licence token, registry token and database password. Never paste either
 into a chat, a ticket or a commit in this clone.
 
+### Object storage: always ask, and recommend both
+
+Two buckets, each behind its own toggle, and both are off unless you set them.
+Ask about them every time, explain the trade, and recommend turning on both:
+
+| Toggle | What it gives them | Without it |
+|---|---|---|
+| `create_spaces_persistence_bucket = true` | Stop, resume, fork and archive for spaces. A space's files are saved and come back on resume. | No fork or archive, and a space keeps its files across stop and resume only on a compute size with a persistent disk. |
+| `create_audit_persistence_bucket = true` | The audit log streamed to a bucket in their own account, as their compliance copy. | Audit events stay inside Marshal only. |
+
+Before they decide, tell them how each bucket is operated:
+
+**Which identity uses the bucket.** No keys are created or stored. The installer
+creates one storage identity and binds it to Marshal's Kubernetes service
+accounts:
+
+- **EKS:** an IAM role `<cluster_name>-storage-role`, bound through IRSA.
+- **GKE:** a Google service account `<cluster_name>-storage`, bound through
+  Workload Identity.
+
+Audit uses the **api** service account (`marshal-api` in the `marshal`
+namespace). Space storage uses the api **and** the **supervisor**
+(`marshal-supervisor` in `marshal-spaces`), because the supervisor does the
+snapshot reads and writes inside each session pod. The grants are object-level,
+on that bucket only.
+
+**Who turns it on.** The bucket is the storage. The feature is switched on in
+Marshal by an **owner or admin** after the install, per organization:
+
+- **Settings > Space Storage:** choose the provider and enter the bucket name.
+- **Settings > Auditing:** in the **Storage** card, choose the provider, enter
+  the bucket name, and select **Save & enable**.
+
+The bucket name comes from `terraform output spaces_persistence_bucket` /
+`audit_persistence_bucket`, without the `s3://` or `gs://` prefix. Leave the
+credential fields empty; the identity above signs every request. Each
+organization added later is connected the same way, by its own owner or admin.
+
+**When to bring their own bucket instead.**
+
+- **EKS:** the installer creates the buckets when it also creates the cluster
+  (`deploy_cluster = true`). On a cluster they already run, leave both toggles
+  out. They create the bucket and an IRSA role with object access to it, then
+  set:
+  - `api_service_account_annotations = { "eks.amazonaws.com/role-arn" = "<role arn>" }`
+  - the same in `supervisor_service_account_annotations` for space storage.
+
+  The cluster needs an IAM OIDC provider for this.
+- **single-node-k3s:** use any S3, GCS or Azure bucket, and enter its access key
+  or service-account JSON in the same Settings pages.
+
+Write their answer into `terraform.tfvars` either way. If they decline, set both
+to `false` with a comment, so the next person reading the file sees a decision
+rather than a gap.
+
 ## 4. Apply
 
 **Put the state in S3 before the first apply.** It is their state either way, but
@@ -238,6 +293,13 @@ Expect every pod `Running` and a line reporting the licence state as
 `LICENSED`. Then point them at their hostname. The certificate is a self-signed
 placeholder until they supply a real one, so a browser warning at this stage is
 expected, not a fault: see the TLS section of their cloud's page.
+
+If they took the buckets, have the owner connect them in **Settings > Space
+Storage** and **Settings > Auditing** (see
+[Object storage](#object-storage-always-ask-and-recommend-both)), then launch a
+space, stop it, and resume it. That round trip is the only check that exercises
+the supervisor's identity: the connection test in Settings runs in the api pod,
+so it passes even when the supervisor cannot reach the bucket.
 
 ## 6. Tearing one down
 

@@ -131,15 +131,16 @@ resource "aws_acm_certificate_validation" "requested" {
 }
 
 locals {
-  requested_cert       = one(aws_acm_certificate.requested[*])
   requested_validation = one(aws_acm_certificate_validation.requested[*])
-  # The ARN, not the object. aws_acm_certificate.alb carries private_key, which
-  # the provider marks sensitive, and a collection holding a sensitive value is
-  # itself sensitive in Terraform, so one(...[*]).arn came out sensitive and
-  # output "acm_certificate_arn" refused to render:
+  # Attributes, not the object. Every aws_acm_certificate carries private_key,
+  # which the provider marks sensitive, requested certs included, and a
+  # collection holding a sensitive value is itself sensitive in Terraform, so
+  # one(...[*]).arn came out sensitive and outputs refused to render:
   #   Error: Output refers to sensitive values
   # Splatting the attribute never builds that object.
-  imported_cert_arn = one(aws_acm_certificate.alb[*].arn)
+  requested_cert_arn    = one(aws_acm_certificate.requested[*].arn)
+  requested_cert_status = one(aws_acm_certificate.requested[*].status)
+  imported_cert_arn     = one(aws_acm_certificate.alb[*].arn)
 
   # Priority: your own ARN, then a cert we requested, then the placeholder.
   #
@@ -155,7 +156,7 @@ locals {
   alb_certificate_arn = try(coalesce(
     var.acm_certificate_arn,
     try(local.requested_validation.certificate_arn, ""),
-    try(local.requested_cert.status, "") == "ISSUED" ? try(local.requested_cert.arn, "") : "",
+    try(local.requested_cert_status, "") == "ISSUED" ? try(local.requested_cert_arn, "") : "",
     try(local.imported_cert_arn, ""),
   ), "")
 }

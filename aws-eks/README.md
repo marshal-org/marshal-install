@@ -257,17 +257,35 @@ afterwards means `terraform init -migrate-state` instead.
 ## Optional storage buckets
 
 Two independent, off-by-default toggles (`buckets.tf`, mirroring
-`gcp-gke/buckets.tf`) — S3 + IRSA for the api/supervisor ServiceAccounts:
+`gcp-gke/buckets.tf`). Turn on both unless there is a reason not to: without
+the spaces bucket, spaces cannot be forked or archived and keep their files
+across stop/resume only on a compute size with a persistent disk, and without
+the audit bucket the audit log is never exported.
 
 ```hcl
 create_audit_persistence_bucket  = true   # compliance export of the session audit trail
 create_spaces_persistence_bucket = true   # session pause/resume snapshots
 ```
 
-Creating a bucket doesn't itself turn the feature on — wire the bucket via
-the API afterward (audit: per-org config; spaces: `PUT
-/api/org/space-storage` with `provider=s3`, confirmed against
-`apps/api/internal/spacestorage`).
+**Identity.** One IAM role, `<cluster_name>-storage-role`, assumed through IRSA
+by the api's ServiceAccount (`<release>-api`, for either bucket) and the
+supervisor's (`<release>-supervisor` in `<release>-spaces`, for the spaces
+bucket only, since the supervisor does the snapshot I/O inside session pods).
+Object-level access on each enabled bucket, no keys.
+
+**Turning the features on.** Creating a bucket doesn't do it. After install an
+owner or admin of each org connects it in **Settings > Space Storage** and
+**Settings > Auditing** (Storage card → **Save & enable**): provider Amazon S3,
+the bucket name from `terraform output spaces_persistence_bucket` /
+`audit_persistence_bucket` without `s3://`, the region, and empty credential
+fields.
+
+**Provisioned clusters only.** The buckets and role are created only with
+`deploy_cluster = true`, because the trust policy needs the OIDC provider this
+flavor creates. On a reused cluster leave both toggles off, create the bucket
+and an IRSA role yourself, and pass the role ARN through
+`api_service_account_annotations` (and `supervisor_service_account_annotations`
+for spaces).
 
 ## Design references
 

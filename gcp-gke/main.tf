@@ -88,13 +88,19 @@ module "marshal" {
   extra_ingress_hosts = var.extra_ingress_hosts
   ingress_class_name  = local.effective_ingress_class
   ingress_annotations = local.effective_ingress_annotations
-  ingress_tls         = var.ingress_tls
-  tls_mode            = var.tls_mode
-  tls_cert_pem        = var.tls_cert_pem
-  tls_key_pem         = var.tls_key_pem
-  tls_secret_name     = var.tls_secret_name
-  preview_domain      = var.preview_domain
-  preview_scheme      = var.preview_scheme
+  ingress_mode        = var.ingress_mode
+  gateway = {
+    class_name         = var.gateway_class_name
+    addresses          = local.gateway_addresses
+    cert_manager_certs = local.gateway_cert_names
+  }
+  ingress_tls     = var.ingress_tls
+  tls_mode        = var.tls_mode
+  tls_cert_pem    = var.tls_cert_pem
+  tls_key_pem     = var.tls_key_pem
+  tls_secret_name = var.tls_secret_name
+  preview_domain  = var.preview_domain
+  preview_scheme  = var.preview_scheme
 
   webhook_relay_enabled = var.webhook_relay_enabled
   webhook_relay_url     = var.webhook_relay_url
@@ -110,6 +116,14 @@ module "marshal" {
     google_container_node_pool.control_plane,
     google_artifact_registry_repository_iam_member.node_reader,
   ]
+}
+
+# #29 put a count on module "marshal" (install_marshal). Existing installs hold
+# state at module.marshal; without this, plan destroys the namespace, secrets and
+# helm release and creates them again at module.marshal[0].
+moved {
+  from = module.marshal
+  to   = module.marshal[0]
 }
 
 # ── Guardrails (fail fast at plan) ───────────────────────────────────────────

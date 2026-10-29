@@ -46,6 +46,13 @@ output "next_steps" {
 
     Reach it:
       ${length(local.effective_ingress_tls) > 0 ? "https" : "http"}://${var.ingress_host}
+    %{if var.preview_domain != ""~}
+
+    Previews need DNS too: point a wildcard record *.${var.preview_domain} at the
+    same target as ${var.ingress_host}. If you requested an ACM certificate, the
+    wildcard's validation record is in acm_validation_records as well. Without
+    the wildcard record, preview URLs (${var.preview_scheme}://<port>.${var.preview_domain}) do not resolve.
+    %{endif~}
     %{if var.tls_mode == "self_signed" && length(var.ingress_tls) == 0~}
 
     ⚠ TLS cert is a Marshal-generated PLACEHOLDER (self-signed, Subject O=

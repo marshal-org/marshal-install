@@ -81,10 +81,20 @@ output "argocd_derived_values" {
       global            = { registry = local.effective_registry }
       registryAuth      = { mode = local.effective_registry_auth }
       toolsRegistryBase = local.effective_tools_registry
-      ingress = {
-        className   = local.effective_ingress_class
-        annotations = local.effective_ingress_annotations
-      }
+      ingress = merge(
+        {
+          className   = local.effective_ingress_class
+          annotations = local.effective_ingress_annotations
+        },
+        local.gateway_mode ? {
+          mode = "gateway"
+          gateway = merge(
+            { className = var.gateway_class_name },
+            length(local.gateway_addresses) > 0 ? { addresses = local.gateway_addresses } : {},
+            length(local.gateway_cert_names) > 0 ? { certManagerCerts = local.gateway_cert_names } : {},
+          )
+        } : {},
+      )
     },
     # Only when a bucket exists — an annotation naming a GSA that was never
     # created is worse than none at all.
@@ -113,4 +123,18 @@ output "argocd_derived_values" {
       }
     } : {},
   ))
+}
+
+output "managed_certificate_dns_records" {
+  description = "create_managed_certificate = true: the CNAME records that let Google issue the managed certificate. Add each one in your DNS, wait for managed_certificate_state = ACTIVE, then apply again to serve HTTPS with it. Empty otherwise."
+  value = [for a in google_certificate_manager_dns_authorization.managed : {
+    name = a.dns_resource_record[0].name
+    type = a.dns_resource_record[0].type
+    data = a.dns_resource_record[0].data
+  }]
+}
+
+output "managed_certificate_state" {
+  description = "create_managed_certificate = true: the managed certificate's state. ACTIVE means it is issued; the next apply serves HTTPS with it. null otherwise."
+  value       = local.managed_cert_state
 }
