@@ -17,7 +17,7 @@ registry_pull_token = "mrpt_9f3c…"                            # registry pull 
 
 # The product version to install (== chart version). Current: 0.5.0 — use the
 # version from your onboarding email, or `helm show chart …` after logging in.
-chart_version = "0.27.0" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.28.0" # the version this installer was published for; confirm against your onboarding
 
 # Hostname for the console + API. No real DNS? Use sslip.io against the node's
 # public IP (dashes for dots): marshal.<NODE-IP-DASHED>.sslip.io

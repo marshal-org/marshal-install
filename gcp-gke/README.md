@@ -307,6 +307,53 @@ Same regional `SSD_TOTAL_GB` quota constraint applies across every pool in
 (`gcloud compute regions describe <region> --format="value(quotas)"`) before
 adding entries or raising `disk_size_gb`/`max_node_count`.
 
+### Faster space start on fresh nodes (`image_streaming_enabled`, `max_parallel_image_pulls`)
+
+A node the autoscaler just added has never pulled a space's tool images, so the
+first space on it waits for every image to download before it starts. Two
+opt-in settings shorten that, on every pool this flavor creates (space pools and
+the control-plane pool). Both are off by default; an install that sets neither
+plans no change.
+
+- `image_streaming_enabled = true` turns on GKE image streaming: containers
+  start before their images have fully downloaded. It also enables the
+  `containerfilesystem.googleapis.com` API, which the flavor never disables
+  again. Needs GKE 1.30.1-gke.1329000 or later and the default `COS_CONTAINERD`
+  node image. A custom `node_service_account` also needs
+  `roles/serviceusage.serviceUsageConsumer` on the project, and a VPC Service
+  Controls perimeter must include the API.
+- `max_parallel_image_pulls` (2 to 5) sets how many images a node pulls at
+  once. Unset, GKE's own default applies (2 or 3). The kubelet pulls one pod's
+  images one after another regardless, so this helps when several spaces start
+  on the same new node together, not a single space's start.
+
+Measured on a fresh node (GKE 1.36, a pod mounting 12 tool images, about
+4.9 GB): about 180 s with streaming off and about 30 s with it on, once each
+image has been streamed once in the region. The first start after a new image
+version is published is close to the streaming-off time, because GKE's
+streaming cache fills on first use.
+
+On a running install, either change makes GKE replace the nodes of every pool it
+touches, without waiting for a maintenance window, and the spaces on those nodes
+restart. Apply it at a quiet time. Setting `image_streaming_enabled` back to
+`false` does not turn streaming off on existing pools (GKE keeps the live
+value); to turn it off, run:
+
+```bash
+gcloud container node-pools update <pool> --cluster <cluster> \
+  --location <location> --no-enable-image-streaming
+```
+
+Neither setting does anything on a cluster this flavor does not provision
+(`deploy_cluster = false`).
+
+### Spot space pools (test and development clusters)
+
+Set `spot = true` on a `spaces_pools` entry to run it on Spot VMs: much cheaper,
+but GKE can reclaim a node at any time and the spaces on it restart. Set it when
+the pool is first created: marking an existing pool `spot` replaces the pool.
+The control-plane pool never uses Spot.
+
 ## Provisioning a private cluster (`deploy_cluster = true`)
 
 Terraform creates, all in one apply, then installs onto it:
@@ -417,11 +464,15 @@ delete`).
 ### Skipping the bastion: `dns_endpoint_enabled = true`
 
 The bastion above exists only because the `kubernetes`/`helm` providers dial the
-control-plane IP directly. `dns_endpoint_enabled = true` gives the cluster its
-Google-managed DNS endpoint, which is reachable from anywhere and gated by the
+control-plane IP directly. With `deploy_cluster = true`, `dns_endpoint_enabled = true`
+gives the cluster its Google-managed DNS endpoint *and* points the `kubernetes`/`helm`
+providers at it (publicly trusted certificate, so no cluster CA is passed; the same
+access token authenticates). The DNS endpoint is reachable from anywhere and gated by the
 `container.clusters.connect` IAM permission instead of by source IP — so a
 one-phase apply works from a laptop, and `master_authorized_networks` may stay
-empty (the plan-time check accepts that combination).
+empty (the plan-time check accepts that combination). Only the provisioned
+cluster path (`deploy_cluster = true`) switches the providers; a BYO cluster
+(`deploy_cluster = false`) is still reached over its IP endpoint.
 
 This is the trade one of our own internal clusters already makes: an IP allowlist
 has to be re-applied every time the operator's address changes, and it drifts

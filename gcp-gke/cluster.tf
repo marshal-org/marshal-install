@@ -198,6 +198,16 @@ resource "google_container_cluster" "this" {
   depends_on = [google_compute_router_nat.nat]
 }
 
+# ── Image streaming API (image_streaming_enabled = true) ──────────────────────
+# The pools need the Container File System API before GKE can stream to them.
+# Never disabled by this flavor: something else in the project may use it.
+resource "google_project_service" "containerfilesystem" {
+  count              = local.provision && var.image_streaming_enabled ? 1 : 0
+  project            = var.project_id
+  service            = "containerfilesystem.googleapis.com"
+  disable_on_destroy = false
+}
+
 # ── Node pools ───────────────────────────────────────────────────────────────
 # "spaces_pools" (below) is a map of however many SESSION/SPACE-workload
 # pools a customer wants — one google_container_node_pool per entry, named
@@ -213,6 +223,8 @@ resource "google_container_cluster" "this" {
 # for_each form without a destroy/recreate.
 resource "google_container_node_pool" "spaces" {
   for_each = local.provision ? var.spaces_pools : {}
+
+  depends_on = [google_project_service.containerfilesystem]
 
   name     = coalesce(each.value.pool_name, "${var.cluster_name}-${each.key}-pool")
   cluster  = google_container_cluster.this[0].name
@@ -257,9 +269,27 @@ resource "google_container_node_pool" "spaces" {
     service_account = var.node_service_account != "" ? var.node_service_account : null
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
     labels          = { "workload" = each.key }
+    spot            = each.value.spot
 
     linux_node_config {
       sysctls = var.node_sysctls
+    }
+
+    # Opt-in (image_streaming_enabled / max_parallel_image_pulls). Rendered
+    # only when set: both are Computed in the provider, so an absent block
+    # leaves existing pools untouched.
+    dynamic "gcfs_config" {
+      for_each = var.image_streaming_enabled ? [1] : []
+      content {
+        enabled = true
+      }
+    }
+
+    dynamic "kubelet_config" {
+      for_each = var.max_parallel_image_pulls != null ? [1] : []
+      content {
+        max_parallel_image_pulls = var.max_parallel_image_pulls
+      }
     }
 
     dynamic "taint" {
@@ -283,7 +313,10 @@ resource "google_container_node_pool" "spaces" {
 }
 
 resource "google_container_node_pool" "control_plane" {
-  count    = local.provision ? 1 : 0
+  count = local.provision ? 1 : 0
+
+  depends_on = [google_project_service.containerfilesystem]
+
   name     = "${var.cluster_name}-control-plane-pool"
   cluster  = google_container_cluster.this[0].name
   location = var.location
@@ -320,6 +353,21 @@ resource "google_container_node_pool" "control_plane" {
 
     linux_node_config {
       sysctls = var.node_sysctls
+    }
+
+    # Same opt-ins as the spaces pools (see there). Never Spot.
+    dynamic "gcfs_config" {
+      for_each = var.image_streaming_enabled ? [1] : []
+      content {
+        enabled = true
+      }
+    }
+
+    dynamic "kubelet_config" {
+      for_each = var.max_parallel_image_pulls != null ? [1] : []
+      content {
+        max_parallel_image_pulls = var.max_parallel_image_pulls
+      }
     }
 
     # DEFAULT FALSE — see taint_control_plane_pool's description. An empty

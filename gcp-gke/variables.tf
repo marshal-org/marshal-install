@@ -227,6 +227,12 @@ variable "spaces_pools" {
     with no pool-name suffix) into spaces_pools — set pool_name to the
     existing live name so the map key can be anything without forcing a
     replace. New pools/customers never need this.
+
+    spot = true puts the pool on Spot VMs: much cheaper, but GKE can reclaim a
+    node at any time and the spaces on it restart. Meant for test and
+    development clusters. Marking an EXISTING pool spot replaces the pool
+    (destroy + create), so set it when the pool is first created. The
+    control-plane pool never uses Spot.
   EOT
   type = map(object({
     machine_type   = string
@@ -237,12 +243,68 @@ variable "spaces_pools" {
     max_node_count = optional(number, 5)
     taint          = optional(bool, false)
     pool_name      = optional(string) # see description above
+    spot           = optional(bool, false)
   }))
   default = {
     spaces = {
       machine_type = "e2-standard-4"
       disk_size_gb = 100
     }
+  }
+}
+
+# ── Image pulls on fresh nodes ───────────────────────────────────────────────
+# A node the autoscaler just added has an empty image cache, so the first space
+# on it waits for every tool image to download before it starts. Both settings
+# below are off unless set, and apply only to the pools this flavor creates
+# (deploy_cluster = true).
+
+variable "image_streaming_enabled" {
+  description = <<-EOT
+    Turn on GKE image streaming on every node pool this flavor creates (space
+    pools and the control-plane pool), and enable the Container File System
+    API it needs (containerfilesystem.googleapis.com; never disabled again by
+    this flavor). Containers start before their images are fully downloaded,
+    which shortens space start on a freshly added node.
+
+    Requires GKE 1.30.1-gke.1329000 or later and the default COS_CONTAINERD
+    node image (this flavor never sets another one). Images must come from
+    Artifact Registry, which the default registry cache already does. If you
+    set node_service_account to a custom SA, grant it
+    roles/serviceusage.serviceUsageConsumer on this project. If a VPC Service
+    Controls perimeter protects the project, add containerfilesystem.googleapis.com
+    to it.
+
+    Turning this on for a running install makes GKE replace the nodes of every
+    pool it touches without waiting for a maintenance window; spaces on them
+    restart. Setting it back to false does not turn streaming off on existing
+    pools (GKE keeps the live value): run
+    `gcloud container node-pools update <pool> --cluster <cluster> --location <location> --no-enable-image-streaming`
+    for that. No effect when deploy_cluster = false.
+  EOT
+  type        = bool
+  default     = false
+}
+
+variable "max_parallel_image_pulls" {
+  description = <<-EOT
+    How many images a node pulls at once (kubelet maxParallelImagePulls), on
+    every node pool this flavor creates. 2 to 5. null (default) keeps GKE's own
+    default (2 or 3, depending on the boot disk type). The kubelet pulls the
+    images of ONE pod one after another whatever this is set to; the limit
+    applies across pods. It helps when several spaces start on the same new
+    node at once (a scale-up burst), not the start of a single space: for that,
+    use image_streaming_enabled. A higher value means more disk and network
+    I/O during the burst. Like any node_config
+    change, setting or changing it replaces the nodes of every pool it
+    touches. No effect when deploy_cluster = false.
+  EOT
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.max_parallel_image_pulls == null || try(var.max_parallel_image_pulls >= 2 && var.max_parallel_image_pulls <= 5 && floor(var.max_parallel_image_pulls) == var.max_parallel_image_pulls, false)
+    error_message = "max_parallel_image_pulls must be null or a whole number from 2 to 5 (GKE's allowed range)."
   }
 }
 

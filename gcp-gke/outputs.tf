@@ -81,20 +81,23 @@ output "argocd_derived_values" {
       global            = { registry = local.effective_registry }
       registryAuth      = { mode = local.effective_registry_auth }
       toolsRegistryBase = local.effective_tools_registry
-      ingress = merge(
-        {
+      # A conditional's two arms must share one type, and {} is not the type
+      # of the gateway block, so each optional piece is a zero- or one-element
+      # list, expanded into merge().
+      ingress = merge(concat(
+        [{
           className   = local.effective_ingress_class
           annotations = local.effective_ingress_annotations
-        },
-        local.gateway_mode ? {
+        }],
+        local.gateway_mode ? [{
           mode = "gateway"
-          gateway = merge(
-            { className = var.gateway_class_name },
-            length(local.gateway_addresses) > 0 ? { addresses = local.gateway_addresses } : {},
-            length(local.gateway_cert_names) > 0 ? { certManagerCerts = local.gateway_cert_names } : {},
-          )
-        } : {},
-      )
+          gateway = merge(concat(
+            [{ className = var.gateway_class_name }],
+            length(local.gateway_addresses) > 0 ? [{ addresses = local.gateway_addresses }] : [],
+            length(local.gateway_cert_names) > 0 ? [{ certManagerCerts = local.gateway_cert_names }] : [],
+          )...)
+        }] : [],
+      )...)
     },
     # Only when a bucket exists — an annotation naming a GSA that was never
     # created is worse than none at all.

@@ -8,3 +8,7 @@ terraform.tfvars
 *_override.tf
 !*.example
 crash*.log
+
+# test/gke-image-streaming.sh state (holds credentials) and results copy
+test/.gke-image-streaming-state/
+test/.gke-image-streaming-results.md

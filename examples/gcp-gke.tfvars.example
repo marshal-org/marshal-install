@@ -23,7 +23,7 @@ deployment_id       = "dep_ab12cd"
 registry_pull_token = "mrpt_9f3c…"
 
 # ── Product version + routing ────────────────────────────────────────────────
-chart_version = "0.27.0" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.28.0" # the version this installer was published for; confirm against your onboarding
 ingress_host  = "marshal.acme.com"
 
 # ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
@@ -84,6 +84,12 @@ redis_mode = "bundled"
 #   spaces = { machine_type = "e2-standard-4", disk_size_gb = 100, min_node_count = 1, max_node_count = 5 }
 # }
 # enable_private_endpoint    = true           # false = public endpoint, still authorized-only
+# Faster space start on freshly added nodes (both off by default; turning either
+# on for a running install replaces the pools' nodes — see the flavor README):
+# image_streaming_enabled    = true
+# max_parallel_image_pulls   = 5              # 2 to 5; helps several spaces starting on one new node
+# For a test cluster only, a pool can run on Spot VMs (set at pool creation):
+#   spaces = { machine_type = "e2-standard-4", disk_size_gb = 100, spot = true }
 # deletion_protection        = true
 # When reusing an existing network:
 # network                    = "acme-vpc"

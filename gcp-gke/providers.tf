@@ -27,27 +27,41 @@ locals {
   # the first branch that resolves. When provisioning, the created cluster's
   # endpoint/CA are "known after apply" (unknown at plan) — expected; Terraform
   # defers the k8s/helm resources to apply.
-  cluster_endpoint = try(
+  #
+  # DNS endpoint (dns_endpoint_enabled on a cluster we provision): the providers
+  # dial the Google-managed DNS endpoint instead of the control-plane IP, so a
+  # laptop outside the VPC can reach it (the IP is private and times out). That
+  # endpoint is served by Google Front End with a publicly trusted certificate,
+  # so no cluster CA is passed (null); the same OAuth access token authenticates.
+  # The BYO path (deploy_cluster = false) always uses the IP endpoint + CA.
+  use_dns_endpoint = var.deploy_cluster && var.dns_endpoint_enabled
+
+  cluster_endpoint = local.use_dns_endpoint ? try(one(google_container_cluster.this[*]).control_plane_endpoints_config[0].dns_endpoint_config[0].endpoint, "") : try(
     one(google_container_cluster.this[*]).endpoint,
     one(data.google_container_cluster.existing[*]).endpoint,
   )
-  cluster_ca = try(
+  # The trailing "" only matters under `terraform test` mocks, which plan the
+  # cluster's master_auth as an empty block list instead of unknown. A real
+  # plan never reaches it.
+  cluster_ca = local.use_dns_endpoint ? null : try(
     one(google_container_cluster.this[*]).master_auth[0].cluster_ca_certificate,
     one(data.google_container_cluster.existing[*]).master_auth[0].cluster_ca_certificate,
+    "",
   )
+  cluster_ca_pem = local.cluster_ca == null ? null : base64decode(local.cluster_ca)
 }
 
 provider "kubernetes" {
   host                   = "https://${local.cluster_endpoint}"
   token                  = data.google_client_config.default.access_token
-  cluster_ca_certificate = base64decode(local.cluster_ca)
+  cluster_ca_certificate = local.cluster_ca_pem
 }
 
 provider "helm" {
   kubernetes {
     host                   = "https://${local.cluster_endpoint}"
     token                  = data.google_client_config.default.access_token
-    cluster_ca_certificate = base64decode(local.cluster_ca)
+    cluster_ca_certificate = local.cluster_ca_pem
   }
 
   # Log helm in to the private chart registry with the pull token so an OCI chart

@@ -86,7 +86,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.27.0 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.28.0 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -169,4 +169,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.27.0`, published as `v0.27.0`.
+Generated for Marshal chart version `0.28.0`, published as `v0.28.0`.
