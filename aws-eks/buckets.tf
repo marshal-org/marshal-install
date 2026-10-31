@@ -14,6 +14,12 @@
 # This just provisions the storage + access so that Day-2 step has somewhere
 # to point at.
 
+variable "force_destroy_buckets" {
+  description = "true = `terraform destroy` empties the audit and spaces buckets (every object and every version) before deleting them. false (default) = destroy stops with BucketNotEmpty if either holds anything, which a used install always does: deleting a space in Marshal does not empty its snapshot prefix. Set to true and APPLY before a destroy, because destroy reads it from state rather than tfvars. Leave false for anything you intend to keep: the audit bucket is compliance data."
+  type        = bool
+  default     = false
+}
+
 variable "create_audit_persistence_bucket" {
   description = "Create the audit-persistence S3 bucket (compliance export) + bind it to the api's KSA via IRSA. false (default) creates nothing — bring your own bucket/credentials instead."
   type        = bool
@@ -69,7 +75,7 @@ data "aws_caller_identity" "storage" {
 resource "aws_s3_bucket" "audit_persistence" {
   count         = local.provision && var.create_audit_persistence_bucket ? 1 : 0
   bucket        = local.audit_persistence_bucket_name
-  force_destroy = false # real compliance data — never disposable, unlike harbor's cache bucket.
+  force_destroy = var.force_destroy_buckets # off by default: real compliance data. Turn on only for a teardown.
 
   tags = { Name = local.audit_persistence_bucket_name }
 }
@@ -85,7 +91,7 @@ resource "aws_s3_bucket_versioning" "audit_persistence" {
 resource "aws_s3_bucket" "spaces_persistence" {
   count         = local.provision && var.create_spaces_persistence_bucket ? 1 : 0
   bucket        = local.spaces_persistence_bucket_name
-  force_destroy = false
+  force_destroy = var.force_destroy_buckets
 
   tags = { Name = local.spaces_persistence_bucket_name }
 }

@@ -191,6 +191,16 @@ resource "kubernetes_namespace" "marshal" {
     name   = var.namespace
     labels = { "app.kubernetes.io/managed-by" = "terraform" }
   }
+
+  # The delete waits until the namespace is really gone, and it is not gone
+  # until the cloud's ingress controller has removed the load balancer it built
+  # for the chart's Ingress (the Ingress carries the controller's finalizer).
+  # That is what lets a flavor destroy the network and the static IP after this
+  # without finding them still in use. A GKE load balancer can take several
+  # minutes to delete, longer than the provider's 5-minute default.
+  timeouts {
+    delete = "15m"
+  }
 }
 
 # ── License (installation JWT) Secret ────────────────────────────────────────

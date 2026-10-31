@@ -47,4 +47,59 @@ resource "google_compute_address" "ingress" {
       error_message = "An ingress static IP (needed once tls_mode != \"none\", the default) requires var.subnetwork when reusing an existing cluster/network (deploy_cluster=false or create_network=false)."
     }
   }
+
+  depends_on = [google_project_service.required]
+}
+
+# ── Destroy: wait for GKE to let go of the address ───────────────────────────
+# The chart's Ingress (or Gateway) makes GKE build a load balancer whose
+# forwarding rules hold this address and the proxy-only subnet. GKE deletes
+# them itself, asynchronously, after the Ingress is gone, and only while the
+# cluster still exists. A first destroy failed on exactly that: the release
+# went, the cluster was deleted while GKE was still tearing the load balancer
+# down, and the address and the proxy-only subnet were then "in use" by
+# forwarding rules nothing would ever delete. A second destroy succeeded.
+#
+# This resource sits between the two on destroy: the release depends on it
+# (main.tf), and it depends on the address, the proxy-only subnet and the
+# cluster. So the release is destroyed first, then this waits until no
+# forwarding rule holds the address any more, and only then do the cluster,
+# the subnet and the address go. Nothing happens at create.
+#
+# It needs gcloud on the machine running the destroy (a prerequisite of this
+# flavor anyway). Without gcloud, or after 10 minutes, it gives up and lets
+# the destroy continue rather than blocking it; the README's "Tearing down"
+# section has the manual cleanup.
+resource "terraform_data" "ingress_lb_released" {
+  count = local.needs_static_ip && var.create_ingress_static_ip ? 1 : 0
+
+  input = {
+    project = var.project_id
+    address = google_compute_address.ingress[0].address
+  }
+
+  provisioner "local-exec" {
+    when        = destroy
+    on_failure  = continue
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-EOT
+      command -v gcloud >/dev/null 2>&1 || { echo "gcloud not found: not waiting for GKE to release ${self.input.address}"; exit 0; }
+      err=$(mktemp); trap 'rm -f "$err"' EXIT
+      for i in $(seq 1 60); do
+        # A failed list (expired credentials, a network blip) is not "no rules
+        # left": retry it rather than letting the destroy race GKE.
+        if rules=$(gcloud compute forwarding-rules list --project "${self.input.project}" \
+          --filter="IPAddress=${self.input.address}" --format="value(name)" 2>"$err"); then
+          [ -z "$rules" ] && exit 0
+          echo "waiting for GKE to delete the forwarding rule(s) on ${self.input.address} ($i/60): $(echo $rules)"
+        else
+          echo "gcloud could not list forwarding rules, retrying ($i/60): $(tail -n 1 "$err")"
+        fi
+        sleep 10
+      done
+      echo "forwarding rules still hold ${self.input.address} after 10 minutes; see gcp-gke/README.md, Tearing down"
+    EOT
+  }
+
+  depends_on = [google_container_cluster.this, google_compute_subnetwork.proxy_only]
 }

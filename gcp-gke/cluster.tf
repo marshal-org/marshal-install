@@ -23,6 +23,8 @@ resource "google_compute_network" "vpc" {
   name                    = "${var.cluster_name}-vpc"
   project                 = var.project_id
   auto_create_subnetworks = false
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_compute_subnetwork" "subnet" {
@@ -83,6 +85,8 @@ resource "google_compute_router" "router" {
   project = var.project_id
   region  = local.region
   network = local.network_name
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_compute_router_nat" "nat" {
@@ -195,7 +199,7 @@ resource "google_container_cluster" "this" {
   min_master_version  = var.kubernetes_version
   deletion_protection = var.deletion_protection
 
-  depends_on = [google_compute_router_nat.nat]
+  depends_on = [google_compute_router_nat.nat, google_project_service.required]
 }
 
 # ── Image streaming API (image_streaming_enabled = true) ──────────────────────
@@ -235,12 +239,28 @@ resource "google_container_node_pool" "spaces" {
   # Fixed size, or autoscaling when node_count is null.
   node_count = each.value.node_count
 
+  # An autoscaled pool needs a starting size. Without one GKE creates it EMPTY,
+  # and the autoscaler does not scale up to min_node_count on its own: it adds
+  # nodes only for pods that are Pending. Hit on a fresh install: the
+  # control-plane pool came up with 0 nodes and every platform pod landed on
+  # the spaces pool instead. Per zone, like min_node_count. A min-0 pool still
+  # starts empty, which is what min 0 asks for.
+  initial_node_count = each.value.node_count == null ? each.value.min_node_count : null
+
   dynamic "autoscaling" {
     for_each = each.value.node_count == null ? toset(["autoscale"]) : toset([])
     content {
       min_node_count = each.value.min_node_count
       max_node_count = each.value.max_node_count
     }
+  }
+
+  # initial_node_count only matters at create, and the provider treats a
+  # change to it as a REPLACEMENT of the pool. Pools created before it was set
+  # carry a different value in state; without this every existing install
+  # would plan to destroy and recreate its live node pools.
+  lifecycle {
+    ignore_changes = [initial_node_count]
   }
 
   management {
@@ -325,12 +345,24 @@ resource "google_container_node_pool" "control_plane" {
 
   node_count = var.control_plane_node_count
 
+  # Same reason as the spaces pools, and at least 1: the platform pods have
+  # nowhere else to go once taint_control_plane_pool is on.
+  initial_node_count = var.control_plane_node_count == null ? max(1, var.control_plane_min_node_count) : null
+
   dynamic "autoscaling" {
     for_each = var.control_plane_node_count == null ? toset(["autoscale"]) : toset([])
     content {
       min_node_count = var.control_plane_min_node_count
       max_node_count = var.control_plane_max_node_count
     }
+  }
+
+  # initial_node_count only matters at create, and the provider treats a
+  # change to it as a REPLACEMENT of the pool. Pools created before it was set
+  # carry a different value in state; without this every existing install
+  # would plan to destroy and recreate its live node pools.
+  lifecycle {
+    ignore_changes = [initial_node_count]
   }
 
   management {

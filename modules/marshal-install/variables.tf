@@ -230,6 +230,13 @@ variable "kubeconfig_command" {
   default     = "# point kubectl at the new cluster first; see your cloud's README"
 }
 
+variable "extra_next_steps" {
+  description = "Flavor-specific text appended to next_steps, after \"Reach it\": things that differ per cloud, such as how long its load balancer takes to come up. Empty (default) adds nothing."
+  type        = string
+  default     = ""
+  nullable    = false
+}
+
 variable "ingress_host" {
   description = "Primary app hostname — web + api + gateway are path-routed under it. Example: \"marshal.acme.com\". For a quick k3s test with no real DNS use an sslip.io host like \"marshal.203-0-113-5.sslip.io\"."
   type        = string

@@ -3,6 +3,22 @@
 # cluster.tf). All real install logic lives in the module.
 
 locals {
+  # Appended to next_steps. The ALB is internal by default, so a machine outside
+  # the VPC needs a way in; the web Service serves the console and the API on
+  # one port.
+  eks_next_steps = <<-EOT
+    Open the console from a machine outside the VPC (the ALB is internal):
+      kubectl port-forward -n ${var.namespace} svc/web 8080:80
+      then browse http://localhost:8080 and run: marshal login --server http://localhost:8080
+      Connecting the CLI to a space over this port-forward needs chart 0.29 or newer;
+      on older charts run the CLI from inside the VPC (the bastion).
+      Details, and an internet-facing option: "Reaching the app" in aws-eks/README.md.
+
+    Object storage: set create_spaces_persistence_bucket = true before relying on
+    stop/resume for real work. Tearing down: see "Tearing down" in aws-eks/README.md
+    (the buckets must be emptied, which force_destroy_buckets does).
+  EOT
+
   # Internal vs internet-facing ALB is an annotation, not a separate
   # IngressClass (unlike GKE's "gce" vs "gce-internal" split) — the AWS Load
   # Balancer Controller reads alb.ingress.kubernetes.io/scheme off the same
@@ -97,6 +113,7 @@ module "marshal" {
   chart_version = var.chart_version
 
   kubeconfig_command = "aws eks update-kubeconfig --name ${var.cluster_name} --region ${var.region}"
+  extra_next_steps   = local.eks_next_steps
 
   installation_jwt    = var.installation_jwt
   deployment_id       = var.deployment_id

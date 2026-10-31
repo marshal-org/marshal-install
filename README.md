@@ -60,7 +60,11 @@ takes one), AZ coverage, your on-demand vCPU quota, whether the pinned
 Kubernetes and Postgres versions exist in your region, and whether your DNS
 zone is in Route53. Pass `--help` for every option.
 
-## What you need before you start
+## Credentials (read this first)
+
+<!-- The flavor READMEs link here as ../README.md#credentials-read-this-first,
+     the same anchor the source repo's README has. Rename this heading and
+     those links break in the mirror only. -->
 
 Four values, issued once per deployment by your Marshal contact: `deployment_id`,
 `installation_jwt`, `registry_pull_token`, and the `chart_version` to install.
@@ -86,7 +90,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.28.0 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.29.0 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -169,4 +173,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.28.0`, published as `v0.28.0`.
+Generated for Marshal chart version `0.29.0`, published as `v0.29.0`.

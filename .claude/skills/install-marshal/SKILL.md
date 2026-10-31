@@ -127,7 +127,8 @@ network. Do not pass `--cluster-name` unless they are reusing a cluster: the
 | `kubernetes.io/role/internal-elb absent` | Let `tag_existing_subnets` add it, which is the default. Without it the Ingress never gets an address **and emits no events**, which is slow to diagnose. If the tag is already there the installer leaves it alone, so a later teardown cannot remove a tag that was theirs: it records what it owns in a `marshal.codes/installer-owned-tags` tag on each subnet, removed again at destroy. |
 | `only N free IPs` | Every pod takes a real subnet IP, so this caps concurrent sessions. Under about 60, ask for a bigger subnet now. |
 | `AZ coverage: 1 AZ` | EKS will not create a cluster. Get a second subnet. |
-| `on-demand vCPU quota` low | A quota increase can take days. Start it immediately. The default shape needs **12 vCPU** (one `m5.xlarge` node plus one `m5.2xlarge` control-plane node). 32 is comfortable; 16 gets tight as soon as a second node scales up. |
+| `on-demand vCPU quota` low | A quota increase can take days. Start it immediately. Ask for **40 vCPU**: the default shape needs 12 to create (one `m5.xlarge` node plus one `m5.2xlarge` control-plane node), 14 with the bastion, and 38 once it has scaled out to its default limits. Under 12 it FAILs, because the cluster cannot be created at all; between 12 and 39 it warns, because the quota, not `node_max_size`, then caps how many spaces can run. |
+| `DENIED, not a version problem` | IAM or an organization policy (an SCP) refused the call, so the check could not even ask. Do not change versions. If it names a service control policy, the account's organization may restrict regions: nothing installs in this region until their AWS organization admin allows it, or they pick a region the policy allows. |
 
 A clean preflight proves the environment, not their permissions. Say so.
 

@@ -10,6 +10,13 @@ provider "google" {
   region  = var.location
 }
 
+# Same credentials and project; used only for the Artifact Registry service
+# agent (registry_cache.tf).
+provider "google-beta" {
+  project = var.project_id
+  region  = var.location
+}
+
 data "google_client_config" "default" {}
 
 # Reuse path: read the existing cluster (only when NOT provisioning).

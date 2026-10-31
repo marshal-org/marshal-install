@@ -23,7 +23,7 @@ deployment_id       = "dep_ab12cd"
 registry_pull_token = "mrpt_9f3c…"
 
 # ── Product version + routing ────────────────────────────────────────────────
-chart_version = "0.28.0" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.29.0" # the version this installer was published for; confirm against your onboarding
 ingress_host  = "marshal.acme.com"
 
 # ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
@@ -32,6 +32,9 @@ database_mode = "external"
 database_url  = "postgres://marshal:PW@10.20.0.5:5432/marshal?sslmode=require"
 # Redis holds only ephemeral/reconstructible state → in-cluster is the default.
 redis_mode = "bundled"
+# EVALUATION ONLY — skip Cloud SQL and run Postgres in-cluster too (single pod,
+# demo password, no backups). Leave database_url unset:
+# database_mode = "bundled"
 # To instead point at managed Memorystore:
 # redis_mode = "external"
 # redis_url  = "redis://10.30.0.4:6379"
@@ -47,15 +50,23 @@ redis_mode = "bundled"
 # Or bring your own TLS Secret:
 # ingress_tls = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]
 
-# ── Registry (default: direct pull from registry.marshal.codes) ──────────────
-# Recommended at scale — mirror through a GCP AR remote repo + Workload Identity:
-# registry           = "europe-west1-docker.pkg.dev/acme-prod/marshal-cache/marshal"
-# registry_auth_mode = "workloadIdentity"
+# ── Registry (default: a pull-through cache in your project) ─────────────────
+# create_registry_cache = true is the default: an Artifact Registry remote repo
+# mirrors registry.marshal.codes and nodes pull through it with their own
+# identity. Bundled Postgres/Redis images pull through a second one in front of
+# Docker Hub (cache_bundled_datastore_images, also default true).
+# create_registry_cache = false   # disposable smoke test only: direct pull
+
+# ── Project APIs ─────────────────────────────────────────────────────────────
+# The APIs this install calls are enabled for you (never disabled on destroy).
+# Set false if your organization enables APIs centrally; see the README.
+# enable_project_apis = false
 
 # ── Object storage — recommended: turn on both ──────────────────────────────
 # Both default to false. Without the spaces bucket, spaces cannot be forked or
-# archived, and keep files across stop/resume only on a persistent-disk size; without the audit bucket, the audit log is never
-# exported. Access is keyless (a <cluster_name>-storage GSA via Workload
+# archived, and keep files across stop/resume only on a persistent-disk size:
+# stopping a space on any other size LOSES ITS WORKSPACE. Without the audit
+# bucket, the audit log is never exported. Access is keyless (a <cluster_name>-storage GSA via Workload
 # Identity). After install an owner or admin connects each bucket in
 # Settings > Space Storage / Settings > Auditing. See gcp-gke/README.md.
 # create_spaces_persistence_bucket = true
@@ -107,6 +118,10 @@ redis_mode = "bundled"
 #
 #   gcloud container clusters get-credentials <cluster> \
 #     --location <loc> --dns-endpoint
+#
+# (terraform output next_steps prints that command with --dns-endpoint for you.)
+# It reaches the control plane only; the app itself stays on the internal load
+# balancer — see the README's "Reaching Marshal before DNS exists".
 #
 # dns_endpoint_enabled = true
 

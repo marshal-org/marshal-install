@@ -17,7 +17,7 @@
 #     [--public-subnets subnet-c,subnet-d] \
 #     [--cluster-name marshal-poc] [--ingress-host marshal.acme.com] \
 #     [--acm-arn arn:aws:acm:...] \
-#     [--deployment-id dep_ab12cd --pull-token mrpt_… --chart-version 0.23.0] \
+#     [--deployment-id dep_ab12cd --pull-token-file ./pull-token --chart-version 0.23.0] \
 #     [--k8s-version 1.36] [--rds-version 16.14]
 #
 # Exit code is 1 if anything FAILED, 0 if everything passed or only warned.
@@ -26,6 +26,8 @@ set -uo pipefail
 REGION="" VPC_ID="" PRIVATE_SUBNETS="" PUBLIC_SUBNETS="" CLUSTER_NAME=""
 INGRESS_HOST="" ACM_ARN="" DEPLOYMENT_ID="" PULL_TOKEN="" CHART_VERSION=""
 K8S_VERSION="1.36" RDS_VERSION="16.14"
+# The token can also arrive in the environment, which keeps it off the command line.
+PULL_TOKEN="${MARSHAL_PULL_TOKEN:-}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,7 +39,12 @@ while [ $# -gt 0 ]; do
     --ingress-host)    INGRESS_HOST="${2:-}";    shift 2 ;;
     --acm-arn)         ACM_ARN="${2:-}";         shift 2 ;;
     --deployment-id)   DEPLOYMENT_ID="${2:-}";   shift 2 ;;
-    --pull-token)      PULL_TOKEN="${2:-}";      shift 2 ;;
+    --pull-token-file) [ -f "${2:-}" ] && [ -r "${2:-}" ] || { echo "--pull-token-file: cannot read ${2:-} or it is not a regular file" >&2; exit 2; }
+                       PULL_TOKEN="$(tr -d '[:space:]' < "$2")"
+                       [ -n "$PULL_TOKEN" ] || { echo "--pull-token-file: token is empty" >&2; exit 2; }
+                       shift 2 ;;
+    --pull-token)      echo "warning: --pull-token puts the token in shell history and the process list; prefer --pull-token-file or MARSHAL_PULL_TOKEN" >&2
+                       PULL_TOKEN="${2:-}";      shift 2 ;;
     --chart-version)   CHART_VERSION="${2:-}";   shift 2 ;;
     --k8s-version)     K8S_VERSION="${2:-}";     shift 2 ;;
     --rds-version)     RDS_VERSION="${2:-}";     shift 2 ;;
@@ -55,6 +62,29 @@ skip() { printf '  ----  %-34s %s\n' "$1" "${2:-}"; }
 head2() { printf '\n%s\n' "$1"; }
 
 aws_q() { aws --region "$REGION" "$@" 2>&1; }
+
+# A call that is DENIED and a call that finds nothing need opposite fixes: one
+# is a conversation with whoever owns the account's IAM and organization
+# policies, the other is a different version number. Reporting a denial as
+# "not offered here" sent a tester hunting for a version problem that did not
+# exist, when the account's organization policy (an SCP restricting regions)
+# was refusing every EKS call in the region.
+DENY_RE='AccessDenied|UnauthorizedOperation|not authorized to perform|explicit deny|service control policy|resource control policy'
+denied() { printf '%s' "$1" | grep -Eqi "$DENY_RE"; }
+# The line of the CLI's error that says what refused it, else its last line.
+err_line() {
+  l="$(printf '%s' "$1" | grep -Ei "$DENY_RE|error" | tail -1)"
+  [ -n "$l" ] || l="$(printf '%s' "$1" | tail -1)"
+  printf '%s' "$l"
+}
+# $1 = the IAM action that was refused, $2 = the CLI output.
+deny_msg() {
+  hint="Ask whoever owns this account's IAM policies to allow $1 in $REGION."
+  if printf '%s' "$2" | grep -Eqi 'service control policy|resource control policy|explicit deny'; then
+    hint="An organization policy refuses it. If that policy restricts regions, nothing can be installed in $REGION until it allows it: ask your AWS organization admin, or pick a region the policy allows."
+  fi
+  printf 'DENIED, not a version problem: %s. %s' "$(err_line "$2")" "$hint"
+}
 
 # ── Identity ────────────────────────────────────────────────────────────────
 head2 "Identity"
@@ -88,37 +118,59 @@ if [ -n "$DEPLOYMENT_ID" ] && [ -n "$PULL_TOKEN" ] && [ -n "$CHART_VERSION" ]; t
     rm -rf "$tmp"
   fi
 else
-  skip "chart pull" "pass --deployment-id/--pull-token/--chart-version to check"
+  skip "chart pull" "pass --deployment-id/--pull-token-file/--chart-version to check"
 fi
 
 # ── Region capabilities ─────────────────────────────────────────────────────
 head2 "Region $REGION"
 
-if v="$(aws_q eks describe-addon-versions --kubernetes-version "$K8S_VERSION" --query 'addons[0].addonName' --output text)" \
-   && [ "$v" != "None" ] && [ -n "$v" ]; then
-  pass "EKS $K8S_VERSION available" ""
+if v="$(aws_q eks describe-addon-versions --kubernetes-version "$K8S_VERSION" --query 'addons[0].addonName' --output text)"; then
+  if [ "$v" != "None" ] && [ -n "$v" ]; then
+    pass "EKS $K8S_VERSION available" ""
+  else
+    fail "EKS $K8S_VERSION available" "pick another kubernetes_version; this one is not offered here"
+  fi
+elif denied "$v"; then
+  fail "EKS $K8S_VERSION available" "$(deny_msg eks:DescribeAddonVersions "$v")"
 else
-  fail "EKS $K8S_VERSION available" "pick another kubernetes_version; this one is not offered here"
+  fail "EKS $K8S_VERSION available" "could not check: $(err_line "$v")"
 fi
 
-if aws_q rds describe-db-engine-versions --engine postgres --engine-version "$RDS_VERSION" \
-     --query 'DBEngineVersions[0].EngineVersion' --output text | grep -q "^$RDS_VERSION"; then
-  pass "RDS postgres $RDS_VERSION" ""
+if r="$(aws_q rds describe-db-engine-versions --engine postgres --engine-version "$RDS_VERSION" \
+          --query 'DBEngineVersions[0].EngineVersion' --output text)"; then
+  if printf '%s' "$r" | grep -q "^$RDS_VERSION"; then
+    pass "RDS postgres $RDS_VERSION" ""
+  else
+    fail "RDS postgres $RDS_VERSION" "not available in $REGION; set rds_engine_version to one that is"
+  fi
+elif denied "$r"; then
+  fail "RDS postgres $RDS_VERSION" "$(deny_msg rds:DescribeDBEngineVersions "$r")"
 else
-  fail "RDS postgres $RDS_VERSION" "not available in $REGION; set rds_engine_version to one that is"
+  fail "RDS postgres $RDS_VERSION" "could not check: $(err_line "$r")"
 fi
 
 # L-1216C47A is "Running On-Demand Standard (A,C,D,H,I,M,R,T,Z) instances",
-# counted in vCPUs. The control plane alone wants 8 (one m5.2xlarge).
+# counted in vCPUs. With the aws-eks defaults (m5.xlarge spaces nodes 1..5,
+# m5.2xlarge control-plane nodes 1..2, optional t3.micro bastion):
+#   12 at create (one of each), 14 with the bastion, 38 fully scaled.
+# 40 is the figure the docs and the aws-eks README ask for. Keep the three in
+# step: QUOTA_NEED and QUOTA_FLOOR here, the Quickstart table in
+# aws-eks/README.md, and the install skills that quote them.
+QUOTA_NEED=40 QUOTA_FLOOR=12
 quota="$(aws_q service-quotas get-service-quota --service-code ec2 --quota-code L-1216C47A \
           --query 'Quota.Value' --output text)"
 case "$quota" in
-  ''|*[!0-9.]*) warn "on-demand vCPU quota" "could not read it: ${quota:-no value}" ;;
+  ''|*[!0-9.]*)
+    if denied "$quota"; then
+      warn "on-demand vCPU quota" "could not read it, the call was denied: $(err_line "$quota"). Check L-1216C47A in the Service Quotas console instead: it needs $QUOTA_NEED"
+    else
+      warn "on-demand vCPU quota" "could not read it: $(err_line "${quota:-no value}")"
+    fi ;;
   *)
     q=${quota%.*}
-    if [ "$q" -ge 32 ]; then pass "on-demand vCPU quota" "$q vCPU limit (this is the LIMIT, not free capacity: subtract whatever the account already runs)"
-    elif [ "$q" -ge 16 ]; then warn "on-demand vCPU quota" "$q vCPU, tight: 8 for the control plane plus sessions"
-    else fail "on-demand vCPU quota" "$q vCPU is not enough for one m5.2xlarge plus a session node"
+    if [ "$q" -ge "$QUOTA_NEED" ]; then pass "on-demand vCPU quota" "$q vCPU limit (this is the LIMIT, not free capacity: subtract whatever the account already runs)"
+    elif [ "$q" -ge "$QUOTA_FLOOR" ]; then warn "on-demand vCPU quota" "$q vCPU: enough to create the cluster ($QUOTA_FLOOR), not to scale it out. The defaults reach 38 fully scaled; ask for $QUOTA_NEED"
+    else fail "on-demand vCPU quota" "$q vCPU cannot create the default node groups ($QUOTA_FLOOR: one m5.xlarge + one m5.2xlarge). Ask for $QUOTA_NEED"
     fi ;;
 esac
 
@@ -228,7 +280,7 @@ else
           --query 'VpcEndpoints[].ServiceName' --output text)"
   missing=""
   for svc in ssm ssmmessages ec2messages; do
-    printf '%s' "$eps" | grep -q "\.$svc\$\|\.$svc[[:space:]]" || missing="$missing $svc"
+    printf '%s' "$eps" | grep -q -e "\.${svc}\$" -e "\.${svc}[[:space:]]" || missing="$missing $svc"
   done
   if [ -z "$missing" ]; then
     pass "ssm vpc endpoints" "ssm, ssmmessages, ec2messages present"

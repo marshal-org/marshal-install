@@ -49,6 +49,8 @@ resource "google_service_account" "storage" {
   project      = var.project_id
   account_id   = "${var.cluster_name}-storage"
   display_name = "Marshal (${var.cluster_name}) — audit/spaces persistence bucket access"
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_storage_bucket" "audit_persistence" {
@@ -62,6 +64,8 @@ resource "google_storage_bucket" "audit_persistence" {
   versioning {
     enabled = true
   }
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_storage_bucket" "spaces_persistence" {
@@ -71,6 +75,8 @@ resource "google_storage_bucket" "spaces_persistence" {
   location                    = local.storage_buckets_location
   uniform_bucket_level_access = true
   force_destroy               = false
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_storage_bucket_iam_member" "audit_persistence_object_admin" {

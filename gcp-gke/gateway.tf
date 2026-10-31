@@ -51,6 +51,8 @@ resource "google_certificate_manager_dns_authorization" "managed" {
   project  = var.project_id
   location = local.region
   domain   = each.value
+
+  depends_on = [google_project_service.required]
 }
 
 resource "google_certificate_manager_certificate" "managed" {
@@ -64,6 +66,8 @@ resource "google_certificate_manager_certificate" "managed" {
     domains            = local.managed_cert_domains
     dns_authorizations = [for a in google_certificate_manager_dns_authorization.managed : a.id]
   }
+
+  depends_on = [google_project_service.required]
 }
 
 check "gateway_mode_internal" {

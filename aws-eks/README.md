@@ -13,6 +13,23 @@ Two postures via `deploy_cluster`, mirroring `gcp-gke`:
   Balancer Controller (Helm-installed with its own IRSA role — see **What
   provisioning sets up** below).
 
+## AWS credentials for Terraform
+
+Terraform's AWS provider reads credentials from environment variables, a shared
+credentials profile, SSO, or a `credential_process`. Some provider versions do
+not read a session created by `aws login`
+(`No valid credential sources found`). If you hit that, export the session as
+environment variables:
+
+```bash
+eval "$(aws configure export-credentials --format env)"
+export AWS_REGION=<your region>
+```
+
+Those credentials last about an hour at most; for a 20-minute apply that is
+enough, for a longer session point a profile at `credential_process =
+aws configure export-credentials --profile <name> --format process`.
+
 ## Prerequisites the REUSE path does NOT set up for you
 
 If you're pointing at a cluster you already run (`deploy_cluster = false`),
@@ -236,6 +253,26 @@ enabled (`harbor.tf`):
 
 ## Quickstart
 
+**Before you start: an on-demand vCPU quota of at least 40** in the region
+(EC2 quota `L-1216C47A`, "Running On-Demand Standard (A, C, D, H, I, M, R, T,
+Z) instances"). A new account can start as low as 5, which cannot create the
+cluster at all. Where 40 comes from, with the default node sizes and limits:
+
+| | vCPU |
+|---|---|
+| At create: 1 × `m5.xlarge` spaces node + 1 × `m5.2xlarge` control-plane node | 12 |
+| Optional bastion (`t3.micro`) | +2 |
+| Fully scaled: 5 spaces nodes (`node_max_size`) + 2 control-plane nodes (`control_plane_max_size`) + bastion | 38 |
+
+Ask for 40. With less, the install still comes up (12 is the floor), but the
+autoscaler stops adding space nodes when it hits the quota, so the limit on
+concurrent spaces is the quota, not `node_max_size`. A node group update also
+launches replacement nodes before it drains the old ones, which needs headroom
+above the steady state. Raising the quota is a support request that can take
+days; `scripts/preflight-aws.sh` prints your current value and checks it
+against these numbers. Changed the instance types or the max sizes? Redo the
+sum with yours.
+
 ```bash
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
 $EDITOR terraform.tfvars
@@ -253,6 +290,62 @@ public access block, point `backend_override.tf` at it, and then `init`. Doing i
 afterwards means `terraform init -migrate-state` instead.
 
 `terraform output next_steps` prints the verify commands and the app URL.
+
+Turn on `create_spaces_persistence_bucket` (below) for anything beyond a smoke
+test: without space storage, stopping a space on a compute size without a
+persistent disk loses its workspace.
+
+## Reaching the app
+
+The default posture is an **internal** ALB, reachable only inside your VPC. From
+a machine outside it, you have two supported ways in:
+
+1. **Port-forward the web Service** (nothing to expose):
+
+   ```bash
+   aws eks update-kubeconfig --name <cluster_name> --region <region>
+   kubectl port-forward -n marshal svc/web 8080:80
+   ```
+
+   Open `http://localhost:8080` for the console, and
+   `marshal login --server http://localhost:8080` for the CLI. The web Service
+   serves the console, the API and the space WebSocket on one port. Connecting
+   the CLI to a space through this forward needs chart 0.29 or newer; on older
+   charts run the CLI from the bastion.
+2. **An internet-facing ALB locked to your addresses**: set
+   `internal_ingress = false` (on a network you bring, also give
+   `public_subnet_ids`; the network this flavor creates already has public
+   subnets), and add an `alb.ingress.kubernetes.io/inbound-cidrs` annotation
+   through `ingress_annotations`. Point your `ingress_host` at the ALB.
+
+## Datastores, and `database_mode = "bundled"` for evaluations
+
+Postgres and Redis are set independently. The default is external Postgres
+(`database_mode = "external"` with `database_url`, or `create_rds = true` on a
+provisioned cluster) and in-cluster Redis (`redis_mode = "bundled"`; Redis holds
+only reconstructible state). `redis_mode = "external"` + `redis_url` points at
+ElastiCache instead.
+
+For a trial or a proof of concept, Postgres can run in the cluster too:
+
+```hcl
+database_mode = "bundled"   # in-cluster Postgres (Bitnami subchart); no database_url, no create_rds
+redis_mode    = "bundled"   # the default
+```
+
+Use it **only for an evaluation**: a single pod on an EBS volume (the EBS CSI
+driver must be present, which the provisioning path installs), a fixed demo
+password, no backups and no HA, holding everything durable (orgs, credentials,
+audit). Moving off it later is a `pg_dump` / `pg_restore` onto RDS, not a
+variable change.
+
+The bundled images are Bitnami images pulled from Docker Hub
+(`bitnamilegacy/*`). This flavor has no Docker Hub cache, so they pull
+anonymously and share Docker Hub's per-IP rate limit with everything else
+behind your NAT gateway. If that bites, mirror them (an ECR pull-through cache
+rule for Docker Hub, with your Docker Hub credentials) and point the subcharts
+at it with `values_overrides` (`postgresql.image.registry`,
+`redis.image.registry`).
 
 ## Optional storage buckets
 
@@ -286,6 +379,27 @@ flavor creates. On a reused cluster leave both toggles off, create the bucket
 and an IRSA role yourself, and pass the role ARN through
 `api_service_account_annotations` (and `supervisor_service_account_annotations`
 for spaces).
+
+## Tearing down
+
+`terraform destroy` removes the cluster, network, database and buckets, but three
+settings stop it by design, and each is read from **state**, so change it and
+**apply** before you destroy:
+
+```hcl
+force_destroy_buckets    = true    # empties both buckets (every object and version)
+rds_deletion_protection  = false   # only if create_rds = true
+rds_skip_final_snapshot  = true    # only if you do not want a <cluster_name>-postgres-final snapshot
+```
+
+Without `force_destroy_buckets`, destroy stops with `BucketNotEmpty`: deleting a
+space in Marshal does not empty its snapshot prefix, and the audit bucket is
+versioned. Leave it `false` for anything you intend to keep.
+
+Order: delete your spaces in Marshal (so no pods hold volumes), `terraform apply`
+with the settings above, then `terraform destroy`. Afterwards,
+`aws eks list-clusters`, `aws rds describe-db-instances` and
+`aws s3api list-buckets` in your region should show nothing of yours.
 
 ## Design references
 

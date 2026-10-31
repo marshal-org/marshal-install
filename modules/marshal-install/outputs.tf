@@ -57,17 +57,20 @@ output "next_steps" {
 
     ⚠ TLS cert is a Marshal-generated PLACEHOLDER (self-signed, Subject O=
       "Marshal Platform Temp Cert") — browsers/clients will warn. Replace it
-      with tls_mode="inline" (paste real PEM into tfvars), or with a mode your
-      platform supports. Read the TLS section of your cloud's README before
+      with tls_mode="inline" (paste real PEM into tfvars; on AWS the installer
+      imports it into ACM), with acm_certificate_arn where your cloud's flavor
+      has one, or with a mode your platform supports. Read the TLS section of
+      your cloud's README before
       switching: an AWS load balancer serves certificates from ACM and cannot
       read a Kubernetes TLS Secret at all, so tls_mode="secret" needs more than
       a one-line change there;
       no other config needs to change.
     %{endif~}
 
-    Day-2:
+    ${var.extra_next_steps == "" ? "" : "${trimspace(var.extra_next_steps)}\n\n"}Day-2:
       • Upgrade   — bump chart_version and re-apply.
-      • Object storage for pause/resume is configured per-org via the API
-        (PUT /api/org/space-storage), not here.
+      • Object storage for pause/resume is configured per org, not here: an
+        owner or admin connects it in Settings > Space Storage (the API route
+        behind that screen is PUT /api/org/space-storage).
   EOT
 }

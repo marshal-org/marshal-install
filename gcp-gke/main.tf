@@ -50,6 +50,42 @@ locals {
       "kubernetes.io/ingress.regional-static-ip-name" = var.ingress_static_ip_name
     } : {},
   )
+
+  # With the DNS endpoint on, the IP endpoint is private (or allowlisted), so a
+  # kubeconfig from plain get-credentials points kubectl at an address a laptop
+  # cannot reach. Same condition the providers use (providers.tf).
+  kubeconfig_command = "gcloud container clusters get-credentials ${var.cluster_name} --location ${var.location} --project ${var.project_id}${local.use_dns_endpoint ? " --dns-endpoint" : ""}"
+
+  # Only known when this root reserved the address itself.
+  ingress_ip_address = one(google_compute_address.ingress[*].address)
+
+  # GKE-specific paragraphs appended to the module's next_steps. Each one is
+  # something a first install ran into without a word of warning.
+  gke_next_steps = join("\n\n", [for p in [
+    <<-EOT
+      The load balancer is NOT ready when the apply finishes. GKE takes about
+      5-8 minutes to program it and pass its health checks, HTTP first and
+      HTTPS a few minutes after; until then the URL times out, fails the TLS
+      handshake or answers 502. Watch it:
+        kubectl get ${local.gateway_mode ? "gateway" : "ingress"} -n ${var.namespace} -w
+    EOT
+    ,
+    local.ingress_ip_address == null ? "" : "Ingress IP: ${local.ingress_ip_address} (${var.internal_ingress ? "internal, reachable inside the VPC only" : "external"}). Point ${var.ingress_host} at it.",
+    <<-EOT
+      No DNS yet, or working from outside the VPC: see "Reaching Marshal before
+      DNS exists" in gcp-gke/README.md. A kubectl port-forward to the web or api
+      Service is NOT a working path: the console loads, but the CLI's space
+      connect fails through it.
+    EOT
+    ,
+    var.create_spaces_persistence_bucket ? "" : <<-EOT
+      ⚠ Space storage is OFF (create_spaces_persistence_bucket = false). Until an
+        org connects a bucket in Settings > Space Storage, a space keeps its files
+        across stop/resume only on a compute size with a persistent disk, and
+        cannot be forked or archived. Users who stop a space on any other size
+        lose its workspace. See "Object storage" in gcp-gke/README.md.
+    EOT
+  ] : trimspace(p) if p != ""])
 }
 
 module "marshal" {
@@ -63,7 +99,8 @@ module "marshal" {
   chart         = var.chart
   chart_version = var.chart_version
 
-  kubeconfig_command = "gcloud container clusters get-credentials ${var.cluster_name} --location ${var.location} --project ${var.project_id}"
+  kubeconfig_command = local.kubeconfig_command
+  extra_next_steps   = local.gke_next_steps
 
   installation_jwt    = var.installation_jwt
   deployment_id       = var.deployment_id
@@ -106,15 +143,32 @@ module "marshal" {
   webhook_relay_url     = var.webhook_relay_url
   auth_broker_url       = var.auth_broker_url
 
-  values_overrides = var.values_overrides
+  # The bundled-datastore image registry (registry_cache.tf) goes FIRST, so a
+  # values_overrides entry of your own still wins over it.
+  values_overrides = concat(
+    length(local.bundled_image_values) > 0 ? [yamlencode(local.bundled_image_values)] : [],
+    var.values_overrides,
+  )
 
   # When provisioning, install only after both node pools are ready, and (if
   # enabled) after nodes can actually read the cache. Empty (count 0) in the
   # reuse / no-cache paths — a no-op dependency either way.
+  #
+  # The last three are for DESTROY order, not create order. The chart's
+  # Ingress (or Gateway) makes GKE build a load balancer whose forwarding rules
+  # hold the static IP and the proxy-only subnet, which Terraform cannot see.
+  # With these edges the release (and its namespace, whose delete waits for
+  # the Ingress and its GKE finalizer) goes first, then
+  # terraform_data.ingress_lb_released waits for the forwarding rules to be
+  # gone (ingress_ip.tf), and only then the cluster, the subnet and the IP.
   depends_on = [
     google_container_node_pool.spaces,
     google_container_node_pool.control_plane,
     google_artifact_registry_repository_iam_member.node_reader,
+    google_artifact_registry_repository_iam_member.dockerhub_node_reader,
+    google_compute_address.ingress,
+    google_compute_subnetwork.proxy_only,
+    terraform_data.ingress_lb_released,
   ]
 }
 

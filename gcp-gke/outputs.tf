@@ -6,6 +6,16 @@ output "app_url" {
   value       = one(module.marshal[*].app_url)
 }
 
+output "ingress_ip" {
+  description = "The static IP the Ingress (or Gateway) serves on, when this root reserved it (internal_ingress = true with TLS, the default). Point ingress_host at it; for a trial without DNS, a hosts-file entry is enough (README: Reaching Marshal before DNS exists). null otherwise."
+  value       = local.ingress_ip_address
+}
+
+output "kubeconfig_command" {
+  description = "The command that points kubectl at this cluster. Includes --dns-endpoint when the providers use the DNS endpoint (deploy_cluster and dns_endpoint_enabled)."
+  value       = local.kubeconfig_command
+}
+
 output "namespace" {
   description = "Control-plane namespace (install path)."
   value       = one(module.marshal[*].namespace)
@@ -117,13 +127,22 @@ output "argocd_derived_values" {
         tolerations  = local.control_plane_tolerations
       }
     } : {},
-    var.taint_control_plane_pool && var.redis_mode == "bundled" ? {
-      redis = {
-        master = {
-          nodeSelector = local.control_plane_node_selector
-          tolerations  = local.control_plane_tolerations
-        }
-      }
+    # One redis key for both reasons it can appear: merge() is shallow, so two
+    # separate redis blocks would silently drop one of them.
+    var.redis_mode == "bundled" && (var.taint_control_plane_pool || local.cache_dockerhub) ? {
+      redis = merge(
+        var.taint_control_plane_pool ? {
+          master = {
+            nodeSelector = local.control_plane_node_selector
+            tolerations  = local.control_plane_tolerations
+          }
+        } : {},
+        local.cache_dockerhub ? { image = { registry = local.dockerhub_cache_endpoint } } : {},
+      )
+    } : {},
+    # The bundled images through the Docker Hub cache (registry_cache.tf).
+    var.database_mode == "bundled" && local.cache_dockerhub ? {
+      postgresql = { image = { registry = local.dockerhub_cache_endpoint } }
     } : {},
   ))
 }

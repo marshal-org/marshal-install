@@ -5,6 +5,7 @@
 mock_provider "google" {
   source = "./tests/mocks"
 }
+mock_provider "google-beta" {}
 mock_provider "kubernetes" {}
 mock_provider "helm" {}
 mock_provider "tls" {}

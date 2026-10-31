@@ -17,9 +17,28 @@ defaults.
 - Application Default Credentials — `gcloud auth application-default login`.
   Reuse needs `container.clusters.get`; provisioning needs `container.admin` +
   compute network admin on the project.
+- **Project APIs are enabled for you** (`enable_project_apis`, default `true`),
+  each only when a setting that uses it is on: Compute Engine and Kubernetes
+  Engine (provisioning, the ingress static IP), Artifact Registry and Secret
+  Manager (`create_registry_cache`, on by default), IAM, IAM Credentials and
+  Cloud Storage (the storage buckets), Certificate Manager (`create_managed_certificate`). None is
+  ever disabled on destroy. On a fresh project this needs
+  `serviceusage.services.enable` (e.g. `roles/serviceusage.serviceUsageAdmin`);
+  an API that is already on is left alone. If your organization enables APIs
+  centrally, set `enable_project_apis = false` and enable them first:
+  ```bash
+  gcloud services enable compute.googleapis.com container.googleapis.com \
+    artifactregistry.googleapis.com secretmanager.googleapis.com \
+    iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com \
+    --project <project>
+  ```
+  The Artifact Registry service agent the registry cache needs is created by
+  the same apply (through the `google-beta` provider, which `terraform init`
+  downloads), so a fresh project installs in one apply, not three.
 - A **Postgres 16** the cluster can reach over the VPC (Cloud SQL private IP) —
   Postgres is the durable source of truth (external is recommended). Redis is
-  in-cluster by default (see [Datastores](#datastores)).
+  in-cluster by default. For an evaluation only, Postgres can run in-cluster
+  too (`database_mode = "bundled"`); see [Datastores](#datastores).
 - Your Marshal onboarding credentials (installation JWT + `dep_` id + `mrpt_`
   pull token) — see **[Credentials](../README.md#credentials-read-this-first)** in
   the top-level README for what they are, where to get them, and a pre-flight
@@ -45,7 +64,9 @@ Reuse posture requires: `project_id`, `cluster_name`, `location`,
 `ingress_host`, and (external Postgres) `database_url`. See
 [`variables.tf`](variables.tf) for the fully-commented list.
 
-## Datastores (Postgres external, Redis bundled)
+## Datastores
+
+Default posture: Postgres external, Redis bundled.
 
 Postgres and Redis are configured **independently**:
 
@@ -65,6 +86,27 @@ database_mode = "external"
 database_url  = "postgres://marshal:PW@10.20.0.5:5432/marshal?sslmode=require"
 redis_mode    = "bundled"
 ```
+
+### Evaluations: `database_mode = "bundled"`
+
+For a trial or a proof of concept you can skip Cloud SQL entirely and run
+Postgres in the cluster too:
+
+```hcl
+database_mode = "bundled"   # in-cluster Postgres (Bitnami subchart), no database_url
+redis_mode    = "bundled"   # the default
+```
+
+That is one apply with nothing to provision first. Use it **only for an
+evaluation**: the bundled Postgres is a single pod on a persistent disk, with
+a fixed demo password, no backups and no HA, and it holds everything durable
+(orgs, credentials, audit). Moving an evaluation onto Cloud SQL later is a
+database migration (`pg_dump` / `pg_restore`), not a variable change. Any
+install you intend to keep starts on `database_mode = "external"`.
+
+With `create_registry_cache = true` (the default), both bundled images pull
+through a Docker Hub cache in your project instead of from Docker Hub; see
+[Registry](#registry-pull-through-cache--on-by-default-required-for-a-real-install).
 
 ### `redis_mode = "bundled"` on chart ≤0.5.0: image pull fix required
 
@@ -163,6 +205,80 @@ cert-manager for TLS instead of `tls_mode`? Set `internal_ingress = false`,
 escape hatch — always wins over `tls_mode`) with a cert-manager issuer
 annotation.
 
+### The load balancer takes 5-8 minutes after the apply
+
+`terraform apply` finishes when the pods are ready, not when the load balancer
+is. GKE then needs about **5-8 minutes** to program the load balancer for the
+Ingress (or Gateway) and pass its health checks; until then the URL times out,
+fails the TLS handshake or answers 502. HTTP comes up first and HTTPS a few
+minutes later: on a fresh install measured on 2026-10-30, the Ingress got its
+address 5m14s after it was created, answered on HTTP within 7 minutes, and on
+HTTPS at 8m11s. This is normal on every new install and after switching
+`ingress_mode`. Watch for it:
+
+```bash
+kubectl get ingress -n marshal -w        # ingress_mode = "gateway": kubectl get gateway -n marshal -w
+```
+
+The address column fills in first; give it a minute or two more after that for
+the backends to turn healthy.
+
+### Reaching Marshal before DNS exists (trials)
+
+A trial often starts with an `ingress_host` nobody can resolve yet, and with
+the default internal load balancer, from a laptop outside the VPC. Two working
+paths, both of which keep the real hostname, so cookies, OAuth redirects and the
+CLI's space connect all see the host they expect:
+
+**A. From outside the VPC, through an IAP bastion (keeps the load balancer
+internal).** Use the throwaway bastion from
+[the bastion section](#no-existing-vpnbastion-two-phase-apply--an-iap-tunneled-bastion)
+below (it only needs to be in the cluster's VPC), and open a SOCKS proxy
+through it. The hostname is resolved on the bastion, so the hosts entry goes
+there:
+
+```bash
+IP=$(terraform output -raw ingress_ip)     # the internal load balancer address
+HOST=marshal.acme.com                      # your ingress_host
+gcloud compute ssh marshal-bastion --zone <zone> --tunnel-through-iap -- \
+  "echo '$IP $HOST' | sudo tee -a /etc/hosts"
+gcloud compute ssh marshal-bastion --zone <zone> --tunnel-through-iap -- -N -D 1080
+```
+
+Then, on the laptop, send the browser and the CLI through it:
+
+```bash
+# Browser: a profile that uses the proxy, e.g.
+google-chrome --user-data-dir=/tmp/marshal-trial --proxy-server="socks5://localhost:1080" "https://$HOST"
+# CLI (Go honours HTTPS_PROXY, including socks5; --insecure only while the
+# self-signed placeholder certificate is in place):
+export HTTPS_PROXY=socks5://localhost:1080
+marshal --insecure ...
+```
+
+**B. A throwaway trial with an external load balancer.** Set
+`internal_ingress = false` (class `gce`, a public IP) and add a hosts-file
+entry on each machine that needs it:
+
+```bash
+kubectl get ingress -n marshal    # the ADDRESS column, once the load balancer is up
+echo "<address> marshal.acme.com" | sudo tee -a /etc/hosts
+```
+
+This puts Marshal on the internet. Use it only for a disposable trial, never
+for an install you keep, and switch back to `internal_ingress = true` (which
+moves the load balancer and its IP) before real use.
+
+**What does NOT work: `kubectl port-forward` to the web Service.** The console
+loads, but the CLI's space connect fails with
+`lookup api ... server misbehaving`. The web container's own proxy forwards
+`/api/` to the in-cluster `api:8080` without passing the original `Host`
+header on, so the api builds the space's WebSocket URL as `ws://api:8080`, a
+name that only resolves inside the cluster. A port-forward to `svc/api` is fine
+for the version check in `next_steps`, but it does not serve the console or
+`/connect/`. There is also no in-cluster ingress controller to port-forward to
+on GKE: the `gce`/`gce-internal` load balancer runs outside the cluster.
+
 ### Google-managed certificate: `ingress_mode = "gateway"` (chart ≥ 0.27.0)
 
 A GKE Ingress on an internal load balancer cannot use a Google-managed
@@ -219,6 +335,13 @@ spaces_pools = {
   big    = { machine_type = "e2-standard-16", disk_size_gb = 200, min_node_count = 0, max_node_count = 4 }
 }
 ```
+
+An autoscaled pool is created with `min_node_count` nodes per zone (the
+control-plane pool with at least 1), so the platform has somewhere to run the
+moment the cluster is up: GKE creates an autoscaled pool with no starting size
+empty, and its autoscaler only adds nodes for pods that are already Pending.
+That starting size matters only at create; changing it later plans nothing, so
+existing pools are not replaced.
 
 Every entry shares `node_sysctls` (default raises `fs.inotify.max_user_watches`
 to 1048576 and `max_user_instances` to 8192 — GKE's default, ~8192-12288, is
@@ -480,11 +603,26 @@ open because nobody prunes it. The flag deliberately leaves the IP endpoint
 switched ON — turning it off makes GKE derive `enable_private_endpoint = true`
 on the cluster, which every later plan then wants to strip back to `null`.
 
-Fetch a kubeconfig for it with:
+Fetch a kubeconfig for it with `--dns-endpoint`, or kubectl gets the private
+IP endpoint and times out from outside the VPC. `terraform output next_steps`
+and `terraform output kubeconfig_command` already include it whenever
+`deploy_cluster` and `dns_endpoint_enabled` are both on:
 
 ```bash
-gcloud container clusters get-credentials <cluster> --location <loc> --dns-endpoint
+gcloud container clusters get-credentials <cluster> --location <loc> --project <project> --dns-endpoint
+kubectl get pods -n marshal     # works from a laptop; IAM (container.clusters.connect) gates it
 ```
+
+What the DNS endpoint does and does not cover:
+
+- It is the **control plane** only: `terraform`, `kubectl`, `helm` and
+  `kubectl port-forward` work from anywhere. It does **not** make the Marshal
+  app reachable: the Ingress is still an internal load balancer. See
+  [Reaching Marshal before DNS exists](#reaching-marshal-before-dns-exists-trials).
+- The caller needs the `container.clusters.connect` IAM permission on the
+  cluster, plus Kubernetes RBAC as usual.
+- `master_authorized_networks` does not apply to the DNS endpoint, only to the
+  IP endpoint, which stays on.
 
 ## Provision only — when ArgoCD owns the release (`install_marshal = false`)
 
@@ -591,6 +729,26 @@ deployment"), set `create_registry_cache = false` and set `registry` /
 `registry_auth_mode` to point at your own — you're still required to run
 *some* pull-through cache, just not necessarily this repo's.
 
+### Bundled Postgres/Redis images: a Docker Hub cache too
+
+The bundled Postgres and Redis (any `*_mode = "bundled"`, Redis by default) are
+Bitnami images from Docker Hub (`bitnamilegacy/*`), not from
+`registry.marshal.codes`, so the cache above never sees them. Pulled directly,
+they share Docker Hub's anonymous per-IP rate limit with everything else behind
+your Cloud NAT address. So with the cache on, the flavor also creates a second
+Artifact Registry remote repository in front of Docker Hub
+(`dockerhub_cache_repository_id`, default `marshal-dockerhub-cache`; anonymous
+upstream, these are public images), grants the nodes read on it, and points the
+subcharts' `image.registry` at it. Same images and tags, pulled through your
+project.
+
+`cache_bundled_datastore_images = false` turns this off. On an install that
+predates it, the first apply with it on changes the bundled pods' image
+reference, so the Redis (and bundled Postgres) pod restarts once. Redis holds
+only reconstructible state; a bundled Postgres is down for that restart.
+A `values_overrides` entry that sets `postgresql.image` / `redis.image` still
+wins.
+
 ## Object storage (audit + spaces persistence)
 
 The api can use cloud object storage for two **independent** features — audit
@@ -633,7 +791,56 @@ Leave both `false` (default) to bring your own buckets — the org admin then
 enters the bucket's credentials in the same Settings pages instead of relying
 on Workload Identity.
 
+> **⚠ With the spaces bucket off, stop/resume can lose a space's workspace.**
+> Until an org connects space storage, a space keeps its files across
+> stop/resume only on a compute size with a persistent disk; on any other size,
+> stopping it discards the workspace. `terraform output next_steps` repeats this
+> warning while `create_spaces_persistence_bucket = false`. For anything beyond
+> a smoke test, turn the bucket on and connect it in **Settings > Space
+> Storage** before anyone relies on stop/resume.
+>
+> It stays off by default on purpose: a bucket by itself does not turn the
+> feature on (an org admin still connects it), switching the default would
+> create a bucket, a service account and new Workload Identity bindings on every
+> existing install's next apply and restart its api and supervisor pods, and
+> `force_destroy = false` makes a bucket with snapshots in it block
+> `terraform destroy` until you empty it.
+
 ## Day-2 upgrade
 
 Bump `chart_version` and `terraform apply`. Roll back with
 `helm rollback marshal -n marshal`.
+
+## Tearing down (`terraform destroy`)
+
+A disposable cluster needs `deletion_protection = false` applied **before**
+the destroy (the destroy reads it from state, not from tfvars).
+
+`terraform destroy` is one run. The load balancer GKE built for the chart's
+Ingress (or Gateway) is not in Terraform's state, but its forwarding rules hold
+the static IP and the proxy-only subnet, and GKE deletes them only while the
+cluster still exists. So the destroy goes in this order: the release and its
+namespace (the namespace delete waits, up to 15 minutes, for the Ingress and its
+GKE finalizer); then `terraform_data.ingress_lb_released`, which polls
+`gcloud compute forwarding-rules list` until no rule holds the static IP (up to
+10 minutes, printing what it is waiting for); and only then the cluster, the
+subnet and the IP. Expect those two steps to take a few minutes. The wait needs
+`gcloud` on the machine running the destroy; without it, it says so and carries
+on.
+
+If a destroy still stops on `resourceInUseByAnotherResource` for the address
+or the proxy-only subnet (no `gcloud`, an install without the static IP
+(`tls_mode = "none"`), or a cluster that was already gone before the destroy, so
+nothing could clean the load balancer up), delete what GKE left behind and run
+the destroy again:
+
+```bash
+# Forwarding rules GKE created for the Ingress (k8s2-*) or the Gateway (gkegw1-*):
+gcloud compute forwarding-rules list --project <project> --filter="name~^(k8s2-|gkegw1-)"
+gcloud compute forwarding-rules delete <name> --region <region> --project <project>
+# then the target proxies, URL maps and backend services with the same prefix, if any are left
+terraform destroy
+```
+
+Buckets created with `create_*_persistence_bucket` are not force-destroyed:
+empty them first, or the destroy stops on them.
