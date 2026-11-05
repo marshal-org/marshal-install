@@ -15,7 +15,7 @@ variables {
   installation_jwt     = "mock"
   deployment_id        = "mock"
   registry_pull_token  = "mock"
-  chart_version        = "0.0.0"
+  chart_version        = "0.32.0"
   location             = "europe-west1"
   ingress_host         = "marshal.example.com"
   deploy_cluster       = true
@@ -127,6 +127,22 @@ run "taint_schedules_bundled_redis_on_the_control_plane" {
   }
 }
 
+# An upgrade with bundled datastores keeps them next to their zone-bound volume:
+# the platform moves to the tainted pool, Redis does not.
+run "unpinned_datastores_stay_put" {
+  command = plan
+
+  variables {
+    taint_control_plane_pool = true
+    pin_bundled_datastores   = false
+  }
+
+  assert {
+    condition     = !can(yamldecode(output.argocd_derived_values).redis) && yamldecode(output.argocd_derived_values).controlPlane.nodeSelector.workload == "control-plane"
+    error_message = "pin_bundled_datastores = false must leave Redis unpinned while the platform still moves"
+  }
+}
+
 run "external_datastores_have_no_redis_values" {
   command = plan
 
@@ -163,5 +179,21 @@ run "kubeconfig_without_the_dns_endpoint" {
   assert {
     condition     = !strcontains(output.kubeconfig_command, "--dns-endpoint")
     error_message = "without the DNS endpoint the kubeconfig command must not pass --dns-endpoint"
+  }
+}
+
+# The first of the two applies for Cloud SQL on a new VPC installs nothing, so it
+# is not blocked by the missing database_url.
+run "provision_only_skips_database_url" {
+  command = plan
+
+  variables {
+    database_mode = "external"
+    database_url  = ""
+  }
+
+  assert {
+    condition     = contains(keys(google_project_service.required), "sqladmin.googleapis.com") && contains(keys(google_project_service.required), "servicenetworking.googleapis.com")
+    error_message = "external Postgres must enable the Cloud SQL APIs the README's steps need"
   }
 }

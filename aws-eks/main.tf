@@ -7,25 +7,35 @@ locals {
   # the VPC needs a way in; the web Service serves the console and the API on
   # one port.
   eks_next_steps = <<-EOT
-    Open the console from a machine outside the VPC (the ALB is internal):
-      kubectl port-forward -n ${var.namespace} svc/web 8080:80
-      then browse http://localhost:8080 and run: marshal login --server http://localhost:8080 --password
-      Claim the owner account over the same port-forward:
-      http://localhost:8080/setup#token=<TOKEN>
-      Connecting the CLI to a space over this port-forward needs chart 0.29 or newer;
-      on older charts run the CLI from inside the VPC (the bastion).
-      Details, and an internet-facing option: "Reaching the app" in aws-eks/README.md.
+    The ALB is internal, so from a machine outside the VPC use the port-forward
+    from "Verify" above. Connecting the CLI to a space through it needs chart 0.29
+    or newer; on older charts run the CLI from inside the VPC (the bastion).
+    Details, and an internet-facing option: "Reaching the app" in aws-eks/README.md.
 
-    ${var.create_spaces_persistence_bucket ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created.\n    Settings > Space Storage > provider S3, bucket ${aws_s3_bucket.spaces_persistence[0].bucket}, credential fields empty, Save & enable." : "Space storage is OFF (create_spaces_persistence_bucket = false): a space that is stopped on a size without a persistent disk LOSES its workspace."}
-    ${var.create_audit_persistence_bucket ? "Audit export: Settings > Auditing > Storage > provider S3, bucket ${aws_s3_bucket.audit_persistence[0].bucket}." : ""}
+    ${var.create_spaces_persistence_bucket ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created.\n    Settings > Space Storage > provider Amazon S3, bucket ${aws_s3_bucket.spaces_persistence[0].bucket}, region ${var.region}, credential fields empty, Save & enable." : "Space storage is OFF (create_spaces_persistence_bucket = false): a space that is stopped on a size without a persistent disk LOSES its workspace."}
+    ${var.create_audit_persistence_bucket ? "Audit export: Settings > Auditing > Storage > provider Amazon S3, bucket ${aws_s3_bucket.audit_persistence[0].bucket}, region ${var.region}, Save & enable." : ""}
 
     If an apply is interrupted (expired credentials, a closed laptop), run
     terraform plan before applying again: a cluster whose create did not finish is
     tainted, and the next apply replaces it. See "If an apply is interrupted" in
     aws-eks/README.md.
 
-    Tearing down: see "Tearing down" in aws-eks/README.md (the buckets must be
-    emptied, which force_destroy_buckets does).
+    Tearing down, in this order (details: "Tearing down" in aws-eks/README.md):
+      1. Delete every space in Marshal.
+      2. In terraform.tfvars set force_destroy_buckets = true and, with create_rds,
+         rds_deletion_protection = false and rds_skip_final_snapshot = true; terraform apply.
+      3. kubectl delete namespace ${var.namespace} ${var.release_name}-spaces
+      4. terraform destroy (about 12 minutes).
+  EOT
+
+  # The ALB serves only ACM certificates, so the module's generic advice
+  # (tls_mode = "secret") does not apply here.
+  eks_tls_next_steps = <<-EOT
+    Replace it with an ACM certificate in ${var.region}: acm_certificate_arn (one you
+    own), acm_request_certificate (the installer requests one), or tls_mode = "inline"
+    (the installer imports your PEM into ACM). An ALB cannot read a Kubernetes TLS
+    Secret, so tls_mode = "secret" does not apply. See "TLS: where the certificate
+    comes from" in aws-eks/README.md.
   EOT
 
   # Internal vs internet-facing ALB is an annotation, not a separate
@@ -126,6 +136,7 @@ module "marshal" {
 
   kubeconfig_command = "aws eks update-kubeconfig --name ${var.cluster_name} --region ${var.region}"
   extra_next_steps   = local.eks_next_steps
+  tls_next_steps     = local.eks_tls_next_steps
 
   installation_jwt    = var.installation_jwt
   deployment_id       = var.deployment_id
@@ -137,6 +148,7 @@ module "marshal" {
 
   control_plane_node_selector = local.control_plane_node_selector
   control_plane_tolerations   = local.control_plane_tolerations
+  pin_bundled_datastores      = var.pin_bundled_datastores
 
   api_service_account_annotations        = local.api_service_account_annotations
   supervisor_service_account_annotations = local.supervisor_service_account_annotations

@@ -80,14 +80,32 @@ locals {
       CLI's space connect fails through a port-forward.
     EOT
     ,
-    var.create_spaces_persistence_bucket ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created. Settings > Space Storage > provider GCS, bucket ${google_storage_bucket.spaces_persistence[0].name}, credential fields empty, Save & enable." : <<-EOT
+    var.create_spaces_persistence_bucket ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created. Settings > Space Storage > provider Google Cloud Storage, bucket ${google_storage_bucket.spaces_persistence[0].name} (location ${google_storage_bucket.spaces_persistence[0].location}), credential fields empty, Save & enable." : <<-EOT
       ⚠ Space storage is OFF (create_spaces_persistence_bucket = false). Until an
         org connects a bucket in Settings > Space Storage, a space keeps its files
         across stop/resume only on a compute size with a persistent disk, and
         cannot be forked or archived. Users who stop a space on any other size
         lose its workspace. See "Object storage" in gcp-gke/README.md.
     EOT
+    ,
+    var.create_audit_persistence_bucket ? "Audit export: Settings > Auditing > Storage > provider Google Cloud Storage, bucket ${google_storage_bucket.audit_persistence[0].name}, credential fields empty, Save & enable." : "",
+    <<-EOT
+      Tearing down, in this order (details: "Tearing down" in gcp-gke/README.md):
+        1. Delete every space in Marshal.
+        2. In terraform.tfvars set ${join(" and ", compact([local.provision ? "deletion_protection = false" : "", local.create_any_storage_bucket ? "force_destroy_buckets = true" : ""]))}; terraform apply.${local.provision || local.create_any_storage_bucket ? "" : " (Nothing to set on this install: skip the apply.)"}
+        3. ${!(local.provision && var.create_network) ? "The network and your database stay: this install did not create the VPC, so a Cloud SQL instance on it is yours to keep or delete." : var.database_mode == "external" ? "Delete the Cloud SQL instance, then its Private Services Access peering and range: the destroy cannot remove the VPC while they hold it (the README has the commands)." : "Nothing to delete by hand: the bundled Postgres goes with the cluster."}
+        4. terraform destroy (about 15 to 20 minutes).
+    EOT
   ] : trimspace(p) if p != ""])
+
+  # The GKE load balancer can serve a Google-managed certificate through a
+  # Gateway, which the module's generic advice does not know about.
+  gke_tls_next_steps = <<-EOT
+    Replace it with tls_mode = "inline" (your certificate and key in tfvars),
+    tls_mode = "secret" (a TLS Secret you manage, for example from cert-manager), or
+    a Google-managed certificate: ingress_mode = "gateway" and
+    create_managed_certificate = true. See "Ingress / TLS" in gcp-gke/README.md.
+  EOT
 }
 
 module "marshal" {
@@ -103,6 +121,7 @@ module "marshal" {
 
   kubeconfig_command = local.kubeconfig_command
   extra_next_steps   = local.gke_next_steps
+  tls_next_steps     = local.gke_tls_next_steps
 
   installation_jwt    = var.installation_jwt
   deployment_id       = var.deployment_id
@@ -116,6 +135,7 @@ module "marshal" {
   supervisor_service_account_annotations = local.supervisor_service_account_annotations
   control_plane_node_selector            = local.control_plane_node_selector
   control_plane_tolerations              = local.control_plane_tolerations
+  pin_bundled_datastores                 = var.pin_bundled_datastores
 
   # Postgres + Redis toggled independently (default: external Cloud SQL + bundled Redis).
   database_mode = var.database_mode
@@ -177,13 +197,6 @@ moved {
 }
 
 # ── Guardrails (fail fast at plan) ───────────────────────────────────────────
-check "database_url_supplied" {
-  assert {
-    condition     = var.database_mode != "external" || var.database_url != ""
-    error_message = "database_mode=\"external\" requires database_url."
-  }
-}
-
 check "redis_url_supplied" {
   assert {
     condition     = var.redis_mode != "external" || var.redis_url != ""

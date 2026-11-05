@@ -410,6 +410,34 @@ variable "node_group_update_max_unavailable" {
   default     = 1
 }
 
+variable "pin_bundled_datastores" {
+  description = <<-EOT
+    With taint_control_plane_pool = true, also move the bundled Redis and
+    Postgres (redis_mode / database_mode = "bundled") onto the control-plane
+    node group. true (default) is right for a new install: their zone-bound
+    volumes stay off the spaces nodes, so those can scale down.
+
+    Set false when UPGRADING an install that ran with the taint off and has
+    bundled datastores: their volumes were created in the zone of whatever node
+    they first ran on. If the control-plane node is in another zone, the moved
+    pod cannot attach its volume and stays Pending ("didn't match
+    PersistentVolume's node affinity"), Redis is down and the api crash-loops
+    until the volume is deleted. false keeps them where they are; the platform
+    pods still move. Not needed when node_availability_zone pins every node
+    into one zone.
+
+    Leave it true on an install that already runs the taint: its datastores
+    are on the control-plane node, and false would move them off it, into the
+    same Pending state. Check where they run with
+    `kubectl get pod -n marshal marshal-redis-master-0 marshal-postgresql-0 -o wide`. With false they stay put only until their next
+    reschedule (a node drain, replacement or eviction), which then needs an
+    untainted node in the volume's zone.
+  EOT
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
 variable "taint_control_plane_pool" {
   description = <<-EOT
     Taint the control-plane node group NoSchedule (key=workload, value=

@@ -31,21 +31,37 @@ capabilities:
   - id: taint-control-plane-pool
     since: 0.32.0
     flavors: [aws-eks, gcp-gke]
-    variables: [taint_control_plane_pool]
+    variables: [taint_control_plane_pool, pin_bundled_datastores]
     kind: default-changed
     default: "true"
     previous: "false"
     when: before
-    disruptive: false
+    disruptive: true
     effect_on_existing: >-
       Keeps the platform pods (api, gateway, web, marketplace) on their own node
       pool so they cannot take CPU from spaces. The next apply adds the taint and
-      moves those pods; the platform restarts pod by pod. Running spaces are not touched.
+      moves those pods pod by pod; running spaces are not touched. It ALSO moves
+      a bundled Redis or Postgres onto the control-plane pool, and their volume is
+      bound to the zone they were created in: when the control-plane node is in
+      another zone (any install without node_availability_zone), the moved pod
+      stays Pending, Redis is down, the api crash-loops and the helm upgrade waits
+      out its timeout. Measured on an EKS 0.29.0 upgrade: about 5 minutes of API
+      outage, ended only by deleting the Redis volume. That happens only when THIS
+      upgrade turns the taint on (from 0.29 or older, or taint_control_plane_pool
+      was false) with bundled datastores; then answer pin_bundled_datastores =
+      false. An install already running the taint has its datastores on the
+      control-plane node and keeps the default.
     question: >-
       Marshal now keeps its own platform pods on a dedicated node pool by default,
       so they stop competing with spaces for CPU. Turn this on for your install?
-    recommend: "Yes. Needs chart 0.9.0 or newer. Without it a few spaces fill the node."
-    enable: "taint_control_plane_pool = true"
+      If this upgrade turns it on and you run the bundled Redis or Postgres, keep
+      those where they are (recommended), or move them too?
+    recommend: >-
+      Yes. Add pin_bundled_datastores = false only when this upgrade turns the
+      taint on (from 0.29 or older, or it was false), redis_mode or database_mode
+      is "bundled" and node_availability_zone is unset: the platform moves, the
+      datastores and their volumes stay. Needs chart 0.9.0 or newer.
+    enable: "taint_control_plane_pool = true\npin_bundled_datastores   = false   # only if this upgrade turns the taint on and Redis/Postgres is bundled"
     disable: "taint_control_plane_pool = false"
     needs: "chart_version 0.9.0 or newer"
 
@@ -118,7 +134,12 @@ capabilities:
     recommend: "Yes, unless you run your own autoscaler. Make sure the vCPU quota covers your max node counts."
     enable: "enable_cluster_autoscaler = true"
     disable: "enable_cluster_autoscaler = false"
-    needs: "vCPU quota for the node groups' max sizes (72 recommended)"
+    needs: >-
+      vCPU quota for the node groups' max sizes. The recommendation is now 72
+      (installers up to 0.29 said 40): with a 40 quota the autoscaler's default
+      maximums cannot all be reached, and the quota, not node_max_size, caps how
+      many spaces run. Run scripts/preflight-aws.sh to see the quota and what is
+      already in use.
 
   - id: eks-extra-spaces-node-groups
     since: 0.32.0
@@ -136,3 +157,102 @@ capabilities:
     enable: "spaces_node_groups = { v2 = { instance_types = [\"m5.2xlarge\"], disk_size_gb = 200 } }"
     disable: "spaces_node_groups = {}"
     needs: "vCPU quota for old and new groups at once"
+
+  - id: gke-force-destroy-buckets
+    since: 0.33.0
+    flavors: [gcp-gke]
+    variables: [force_destroy_buckets]
+    kind: new-feature
+    default: "false"
+    when: after
+    disruptive: false
+    effect_on_existing: >-
+      Nothing changes: the buckets keep refusing a destroy while they hold
+      anything, as before. It exists for a teardown, where setting it true and
+      applying lets terraform destroy empty and delete both buckets, the same
+      setting aws-eks already has.
+    question: >-
+      Teardown on GKE can now empty the storage buckets for you
+      (force_destroy_buckets). Are you about to tear this install down?
+    recommend: "Leave it false for any install you keep. Set it true only as part of a teardown, after deleting the spaces in Marshal."
+    enable: "force_destroy_buckets = true   # teardown only"
+    disable: "force_destroy_buckets = false"
+    needs: ""
+
+  - id: gke-cloud-sql-apis
+    since: 0.33.0
+    flavors: [gcp-gke]
+    variables: [database_mode, enable_project_apis]
+    kind: new-feature
+    default: "on with database_mode = \"external\", enable_project_apis = true, and a VPC this install creates"
+    when: before
+    disruptive: false
+    effect_on_existing: >-
+      Only on a cluster AND network this installer creates (deploy_cluster = true,
+      create_network = true) with external Postgres: the next apply also enables
+      the Cloud SQL Admin and Service Networking APIs. An install already on Cloud
+      SQL has both on, so nothing changes in GCP. A reused cluster or network gets
+      nothing new. Neither is disabled on destroy.
+    question: >-
+      The installer now enables the two APIs Cloud SQL needs (Cloud SQL Admin,
+      Service Networking) when Postgres is external. Let it, or does your
+      organization enable APIs centrally?
+    recommend: "Let it, unless your organization enables APIs centrally; then keep enable_project_apis = false and enable them yourself."
+    enable: "enable_project_apis = true"
+    disable: "enable_project_apis = false   # enable sqladmin and servicenetworking yourself"
+    needs: "serviceusage.services.enable on the project"
+
+  - id: pin-bundled-datastores
+    since: 0.33.0
+    flavors: [aws-eks, gcp-gke]
+    variables: [pin_bundled_datastores]
+    kind: new-feature
+    default: "true"
+    when: before
+    disruptive: true
+    effect_on_existing: >-
+      With taint_control_plane_pool = true and bundled Redis or Postgres, true
+      (the default) schedules them on the control-plane pool. On an install whose
+      datastores already run on another node, their zone-bound volume may be in
+      a different zone from the control-plane node, and the pod then cannot
+      start. false keeps them where they are. With false they stay put only until their next reschedule (a node drain, replacement or eviction), which then needs an untainted node in the volume's zone. No effect with external
+      datastores or with the taint off. On an install that already runs the
+      taint, the datastores are ON the control-plane node, and false would move
+      them OFF it, into the same outage: keep true there.
+    question: >-
+      Does your bundled Redis/Postgres run outside the control-plane pool today?
+      Check with `kubectl get pod -n marshal marshal-redis-master-0 marshal-postgresql-0 -o wide` and `kubectl get nodes -l workload=control-plane`. If it
+      runs elsewhere, keep it where it is, so its volume stays attached?
+    recommend: >-
+      false only when this upgrade turns taint_control_plane_pool on (from 0.29
+      or older, or it was false), the datastores are bundled, and the check shows
+      them on a node outside the control-plane pool. Otherwise, a new install or
+      one already running the taint, keep the default true. To move Redis
+      later anyway: its data is rebuildable, so delete its PVC and pod in a quiet
+      window and let it start fresh on the control-plane pool. Never do that for
+      a bundled Postgres.
+    enable: "pin_bundled_datastores = true"
+    disable: "pin_bundled_datastores = false"
+    needs: ""
+
+  - id: eks-rds-security-group-name-prefix
+    since: 0.32.0
+    flavors: [aws-eks]
+    variables: [create_rds]
+    kind: new-feature
+    default: "no new setting; applies whenever create_rds = true"
+    when: before
+    disruptive: false
+    effect_on_existing: >-
+      The RDS security group moved from a fixed name to name_prefix with
+      create_before_destroy, so the first plan after upgrading from 0.29 or older
+      REPLACES it (1 to destroy). The new group is attached before the old one is
+      removed; measured: the database moved in 1m23s with no errors. Nothing to
+      choose; it is listed so the destroy line in the plan is expected.
+    question: >-
+      The plan replaces the database's security group (a new one is attached
+      first, the database stays up). Expected and safe: go ahead?
+    recommend: "Yes. It is an in-place swap; the database is not replaced."
+    enable: "nothing to set"
+    disable: "nothing to set"
+    needs: ""

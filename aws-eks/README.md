@@ -148,7 +148,13 @@ for you automatically:
   toleration atomically, same toggle shape as `gcp-gke`. It needs chart
   **0.9.0 or newer**; `terraform plan` warns when `chart_version` is older.
   Without the taint, control-plane pods (about 4.4 vCPU of requests) can land
-  on the spaces nodes and leave room for only a couple of sessions.
+  on the spaces nodes and leave room for only a couple of sessions. **With the
+  bundled Redis or Postgres on an install that ran without the taint**, set
+  `pin_bundled_datastores = false` when you turn the taint on (not on one
+  already running it, whose datastores are on the control-plane node): their EBS volume
+  is in the zone they were created in, and moved to a control-plane node in
+  another zone the pod cannot start (Redis down, the api crash-looping). Not
+  needed with `node_availability_zone`, or with RDS and ElastiCache.
   **Upgrading an existing install:** the next apply adds the taint and the chart
   `nodeSelector` together, and the helm upgrade moves the control-plane pods.
   The new `spaces` defaults (`m5.2xlarge`, 200 GB; were `m5.xlarge`, 100 GB)
@@ -159,7 +165,10 @@ for you automatically:
   group in `spaces_node_groups` beside the old one, cordon the old nodes
   (`kubectl cordon -l eks.amazonaws.com/nodegroup=<cluster_name>-spaces`), ask your
   users to stop and start their spaces, and once the old nodes hold no space pods
-  set `create_default_spaces_node_group = false`. Both groups run at once, so the
+  set `create_default_spaces_node_group = false`. On an install that ran with the
+  taint off, spaces may also run on the control-plane node, which the cordon
+  above does not cover: `kubectl get pods -n marshal-spaces -o wide` shows them,
+  and they need a stop and start too. Both groups run at once, so the
   vCPU quota must cover both. For capacity planning see
   https://docs.marshal.codes/sizing. To collect logs for a support case, run
   `scripts/support-bundle.sh --since 6h --space <name>` (it asks whether to include the audit log; default no).
@@ -190,7 +199,10 @@ for you automatically:
   instance, single-AZ (`rds_multi_az`, default false), 20GB gp3 storage, 1-day
   backup retention. Cheap on purpose: Marshal is a developer tool, so its
   database is not in the customer's own availability path, and Multi-AZ roughly
-  doubles the instance bill. What is NOT cheap-by-default is losing it:
+  doubles the instance bill. **Upgrading from 0.29 or older:** the first plan
+  replaces the RDS security group (`<cluster_name>-rds` became a `name_prefix`
+  with create-before-destroy), shown as one destroy. The new group is attached
+  first; measured, the database moved in 1m23s with no errors. What is NOT cheap-by-default is losing it:
   `rds_deletion_protection` is **true** and `rds_skip_final_snapshot` is
   **false**, because this database holds the envelope-encrypted credential
   store and the audit trail, and both knobs cost nothing. The consequence is
@@ -354,6 +366,19 @@ For anything you intend to keep, create a versioned, encrypted S3 bucket with a
 public access block, point `backend_override.tf` at it, and then `init`. Doing it
 afterwards means `terraform init -migrate-state` instead.
 
+On local state, a trial included, keep the files readable by you alone. Terraform
+creates `terraform.tfstate` and its `.backup` with your shell's umask, which on
+many machines lets every local user read them:
+
+```bash
+umask 077                          # before init and apply: new files are 0600
+chmod 600 terraform.tfvars terraform.tfstate* 2>/dev/null   # files that already exist
+```
+
+No DNS of your own for a trial? `ingress_host` only has to be a name; any
+placeholder such as `marshal.trial.internal` works. Reach the app over the
+port-forward in [Reaching the app](#reaching-the-app), which needs no DNS.
+
 `terraform output next_steps` prints the verify commands and the app URL.
 
 Turn on `create_spaces_persistence_bucket` (below) for anything beyond a smoke
@@ -362,8 +387,9 @@ persistent disk loses its workspace.
 
 ## Reaching the app
 
-The default posture is an **internal** ALB, reachable only inside your VPC. From
-a machine outside it, you have two supported ways in:
+The default posture is an **internal** ALB, reachable only inside your VPC, and
+`https://<ingress_host>` works only once that name resolves to it. From a machine
+outside the VPC, or before DNS exists, you have two supported ways in:
 
 1. **Port-forward the web Service** (nothing to expose):
 
@@ -447,24 +473,57 @@ for spaces).
 
 ## Tearing down
 
-`terraform destroy` removes the cluster, network, database and buckets, but three
-settings stop it by design, and each is read from **state**, so change it and
-**apply** before you destroy:
+One procedure, in this order. Every setting in step 2 is read from **state**, not
+from tfvars, so it only counts once it has been applied.
 
-```hcl
-force_destroy_buckets    = true    # empties both buckets (every object and version)
-rds_deletion_protection  = false   # only if create_rds = true
-rds_skip_final_snapshot  = true    # only if you do not want a <cluster_name>-postgres-final snapshot
-```
+1. **Delete every space in Marshal.** A running space keeps saving its workspace
+   to the spaces bucket in the background, so it would refill a bucket the
+   destroy is emptying.
+2. **Turn the guardrails off and apply:**
 
-Without `force_destroy_buckets`, destroy stops with `BucketNotEmpty`: deleting a
-space in Marshal does not empty its snapshot prefix, and the audit bucket is
-versioned. Leave it `false` for anything you intend to keep.
+   ```hcl
+   force_destroy_buckets    = true    # empties both buckets (every object and version)
+   rds_deletion_protection  = false   # only if create_rds = true
+   rds_skip_final_snapshot  = true    # only if you do not want a <cluster_name>-postgres-final snapshot
+   ```
 
-Order: delete your spaces in Marshal (so no pods hold volumes), `terraform apply`
-with the settings above, then `terraform destroy`. Afterwards,
-`aws eks list-clusters`, `aws rds describe-db-instances` and
-`aws s3api list-buckets` in your region should show nothing of yours.
+   ```bash
+   terraform apply
+   ```
+
+   Without `force_destroy_buckets`, destroy stops with `BucketNotEmpty`: deleting a
+   space in Marshal does not empty its snapshot prefix, and the audit bucket is
+   versioned. Leave it `false` for anything you intend to keep.
+3. **Delete the Marshal namespaces:**
+
+   ```bash
+   kubectl delete namespace marshal marshal-spaces   # about a minute
+   ```
+
+   This lets the load balancer controller remove the ALB and the EBS CSI driver
+   delete the volumes while both still have their IAM permissions. Do it after
+   the apply in step 2, never before: Terraform owns the Helm release, so an
+   apply after this step installs the product again.
+4. **Destroy:**
+
+   ```bash
+   terraform destroy
+   ```
+
+   Expect about **12 minutes** for a default install (measured: 12m05s, 59
+   resources). Most of it is the last node group: both groups are deleted
+   together, the CoreDNS pods move to whichever node is left, and their disruption
+   budget holds that node's drain until EKS stops waiting (about 8 minutes). It
+   finishes on its own. A node group whose nodes are already gone (the autoscaler
+   removed them, or they were terminated) still takes about 8 minutes to delete
+   (measured: 8m16s).
+
+If you reach the cluster through a CIDR-locked public endpoint, check it is still
+open before step 2: every step runs `terraform` or `kubectl` against the API.
+
+Afterwards, `aws eks list-clusters`, `aws rds describe-db-instances` and
+`aws s3api list-buckets` in your region should show nothing of yours. A final RDS
+snapshot, if you kept one, stays until you delete it.
 
 ## After the install: owner, first space, storage
 
@@ -493,15 +552,16 @@ take a few minutes.
    `marshal login --server <url> --password` (plain `marshal login` opens a browser, which hangs on a machine without one). A second attempt returns `409`.
 2. **Connect the spaces bucket** (if you created one), before the first space.
    The bucket is the storage; Marshal only uses it once an owner or admin connects it in *Settings > Space
-   Storage* and selecting *Save & enable* (provider S3, the bucket name from `terraform output spaces_persistence_bucket` without the `s3://`, credential fields empty). Until then, and for any space created earlier, a space that is stopped on a compute
+   Storage* and selecting *Save & enable* (provider Amazon S3, the bucket name from `terraform output spaces_persistence_bucket` without the `s3://`, **Region** set to the cluster's `region`, credential fields empty; a wrong region fails with `PermanentRedirect`). Until then, and for any space created earlier, a space that is stopped on a compute
    size without a persistent disk **loses its workspace**, and cannot be forked
    or archived. Connect the audit bucket in *Settings > Auditing* the same way.
 3. **Publish a first stack.** A new install has no stacks or manifests, so *New
    space* has nothing to offer and `marshal spaces new` stops with
-   `a manifest is required to create a space`. As the owner: Marketplace, install
-   a stack such as `default-engineering` and **publish** it (it installs
-   unpublished), then *New space* > *Create a manifest* from it. The page with
-   screenshots is [Publish your first stack](https://docs.marshal.codes/getting-started/owner).
+   `a manifest is required to create a space`. As the owner: *Marketplace* >
+   *Stacks*, **Install stack** on `default-engineering` (it installs the packages
+   the stack needs and creates a draft), then *Stacks* > open the draft >
+   **Publish v1**. Then *New space* > *Create a manifest* from it. The same steps
+   are in [Publish your first stack](https://docs.marshal.codes/getting-started/owner#publish-your-first-stack).
 
 ## If an apply is interrupted
 
@@ -514,6 +574,21 @@ cluster, plus everything on it). If the cluster shows `ACTIVE`
 out of the plan with `terraform untaint 'aws_eks_cluster.this[0]'` and apply
 again. Use a self-refreshing credentials profile (above) so it does not happen
 twice.
+
+## Upgrading
+
+1. Check out the new installer tag; keep `terraform.tfvars` and the state.
+2. Set `chart_version`.
+3. Answer every `capabilities.yaml` entry newer than your version in
+   `terraform.tfvars` (the `install-marshal` skill asks them one by one). Pin
+   `node_instance_types` and `node_disk_size_gb` to what you run, or the new
+   defaults replace the spaces node group and stop every space on it. Set
+   `pin_bundled_datastores = false` next to `taint_control_plane_pool = true`
+   only when this upgrade turns `taint_control_plane_pool` on (from 0.29 or older, or it was `false`) and the bundled Redis or Postgres runs outside the control-plane pool today; check with `kubectl get pod -n marshal marshal-redis-master-0 marshal-postgresql-0 -o wide`. An install already running the taint keeps the default.
+4. `terraform init -upgrade` (the lock file is not in the repository), then
+   `terraform plan`. Apply only a plan that replaces nothing you did not choose;
+   from 0.29 the one expected destroy is the RDS security group (see RDS above).
+5. `terraform apply`. Roll back with `helm rollback marshal -n marshal`.
 
 ## Design references
 

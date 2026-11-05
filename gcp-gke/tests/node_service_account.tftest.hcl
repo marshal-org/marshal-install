@@ -28,7 +28,7 @@ variables {
   installation_jwt     = "mock"
   deployment_id        = "mock"
   registry_pull_token  = "mock"
-  chart_version        = "0.0.0"
+  chart_version        = "0.32.0"
   location             = "europe-west1"
   ingress_host         = "marshal.example.com"
   deploy_cluster       = true

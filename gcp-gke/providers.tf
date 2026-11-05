@@ -83,7 +83,7 @@ provider "helm" {
   # chart in sight.
   #
   # The for_each shape matters. `bool ? [1] : []` is the form already proven on
-  # the k3s flavor; CLAUDE.md records a real customer-deploy failure from a
+  # the k3s flavor; a real customer deploy failed with a
   # different shape here, and validate cannot catch it because it never
   # evaluates for_each against concrete values.
   #

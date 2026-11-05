@@ -237,6 +237,20 @@ variable "extra_next_steps" {
   nullable    = false
 }
 
+variable "pin_bundled_datastores" {
+  description = "With control_plane_node_selector/tolerations set, also schedule the bundled Redis and Postgres onto the control-plane pool. true (default) keeps their zone-bound volumes off the spaces pool, so it can scale down. Set false on an install whose bundled datastores already run elsewhere: their volume is bound to the zone of the node it was created on, and moving the pod to a control-plane node in another zone leaves it Pending (Redis down, the api crash-looping) until the volume is deleted. Only for an upgrade that turns the control-plane taint on: where the taint already ran, the datastores are on the control-plane node and false would move them off it. With false they stay put only until their next reschedule (a node drain, replacement or eviction), which then needs an untainted node in the volume's zone."
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "tls_next_steps" {
+  description = "How to replace the self-signed placeholder certificate, printed in next_steps while tls_mode = \"self_signed\". Each flavor sets its own, because the options differ per load balancer (an AWS ALB reads only ACM; GKE can use a Google-managed certificate). The default names the options every flavor has."
+  type        = string
+  default     = "Replace it with tls_mode = \"inline\" (your certificate and key in tfvars) or tls_mode = \"secret\" (a TLS Secret you manage, for example from cert-manager). No other config needs to change. See the TLS section of your flavor's README."
+  nullable    = false
+}
+
 variable "ingress_host" {
   description = "Primary app hostname — web + api + gateway are path-routed under it. Example: \"marshal.acme.com\". For a quick k3s test with no real DNS use an sslip.io host like \"marshal.203-0-113-5.sslip.io\"."
   type        = string

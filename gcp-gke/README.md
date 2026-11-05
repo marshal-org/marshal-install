@@ -25,7 +25,10 @@ defaults.
   each only when a setting that uses it is on: Compute Engine and Kubernetes
   Engine (provisioning, the ingress static IP), Artifact Registry and Secret
   Manager (`create_registry_cache`, on by default), IAM, IAM Credentials and
-  Cloud Storage (the storage buckets), Certificate Manager (`create_managed_certificate`). None is
+  Cloud Storage (the storage buckets), Certificate Manager (`create_managed_certificate`),
+  and, with `database_mode = "external"` on a VPC the installer creates
+  (`deploy_cluster = true`, `create_network = true`), Cloud SQL Admin and Service Networking,
+  which the [Cloud SQL steps](#provisioning-cloud-sql-yourself) need. None is
   ever disabled on destroy. On a fresh project this needs
   `serviceusage.services.enable` (e.g. `roles/serviceusage.serviceUsageAdmin`);
   an API that is already on is left alone. If your organization enables APIs
@@ -34,13 +37,16 @@ defaults.
   gcloud services enable compute.googleapis.com container.googleapis.com \
     artifactregistry.googleapis.com secretmanager.googleapis.com \
     iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com \
+    sqladmin.googleapis.com servicenetworking.googleapis.com \
     --project <project>
   ```
   The Artifact Registry service agent the registry cache needs is created by
   the same apply (through the `google-beta` provider, which `terraform init`
   downloads), so a fresh project installs in one apply, not three.
 - A **Postgres 16** the cluster can reach over the VPC (Cloud SQL private IP) —
-  Postgres is the durable source of truth (external is recommended). Redis is
+  Postgres is the durable source of truth (external is recommended). On a new
+  cluster (`deploy_cluster = true`) its VPC does not exist yet, so the install
+  is two applies; see [Provisioning Cloud SQL yourself](#provisioning-cloud-sql-yourself). Redis is
   in-cluster by default. For an evaluation only, Postgres can run in-cluster
   too (`database_mode = "bundled"`); see [Datastores](#datastores).
 - Your Marshal onboarding credentials (installation JWT + `dep_` id + `mrpt_`
@@ -51,12 +57,19 @@ defaults.
 ## Install
 
 ```bash
+umask 077   # terraform.tfvars and a local terraform.tfstate hold your licence and tokens
 cp ../examples/gcp-gke.tfvars.example terraform.tfvars
 $EDITOR terraform.tfvars
 terraform init
 terraform apply
 terraform output next_steps
 ```
+
+Keep the state in a GCS bucket for anything you intend to keep (versioning and
+uniform bucket-level access on, configured in `backend_override.tf`). On local
+state, a trial included, `umask 077` makes Terraform create `terraform.tfstate`
+and its `.backup` readable by you alone; for files that already exist, run
+`chmod 600 terraform.tfvars terraform.tfstate*`.
 
 The providers authenticate to the cluster with a short-lived GCP token from your
 ADC — no kubeconfig file is read or written.
@@ -615,7 +628,7 @@ cluster_name               = "marshal"        # name of the NEW cluster
 location                   = "europe-west1"
 master_authorized_networks = [{ cidr_block = "10.8.0.0/24", display_name = "admin-vpn" }]
 database_mode = "external"
-database_url  = "postgres://marshal:PW@10.20.0.5:5432/marshal?sslmode=require"
+database_url  = "postgres://marshal:PW@10.20.0.5:5432/marshal?sslmode=require"  # second apply, see Cloud SQL below
 ```
 
 Because the control plane is private, run `terraform` (and later `kubectl`) from
@@ -802,32 +815,57 @@ Two failure modes to know about this path:
 
 ## Provisioning Cloud SQL yourself
 
-This repo deliberately does **not** create the Postgres instance — `database_url`
-is a bring-your-own input (see CLAUDE.md: un-codifiable, customer-owned
-resources are documented here, not silently assumed). Exact commands, assuming
-`deploy_cluster = true` created the VPC already:
+This installer does not create the Postgres instance: `database_url` is an input,
+so the database fits the way you already run Cloud SQL (tier, backups, HA,
+maintenance window). Cloud SQL's private IP lives in a VPC, which decides the
+order:
+
+- **Your cluster** (`deploy_cluster = false`) or **your network**
+  (`create_network = false`): the VPC exists. Create Cloud SQL first, then run
+  the one apply with `database_url` set.
+- **A new cluster and network** (`deploy_cluster = true`): the VPC is created by
+  this apply, so install in two applies, with no `-target`:
+  1. `install_marshal = false` and `terraform apply`. It builds the network,
+     cluster, node pools, registry cache and buckets, enables the Cloud SQL APIs,
+     and installs nothing. Ignore the ArgoCD steps it prints.
+  2. Create Cloud SQL on that VPC with the commands below. The VPC is
+     `<cluster_name>-vpc`; `gcloud compute networks list` shows it.
+  3. Set `database_url` and `install_marshal = true`, then `terraform apply`. It
+     installs Marshal onto the cluster from step 1.
+
+`terraform plan` stops when `database_mode = "external"` has no `database_url`
+and `install_marshal` is true, so the order cannot be skipped by accident.
 
 ```bash
-# Private Services Access — one-time per VPC, needed for Cloud SQL private IP.
-gcloud compute addresses create google-managed-services-<vpc> \
+# The two APIs. The installer enables them with database_mode = "external" on a VPC
+# it creates; run this on your own cluster or network, or with enable_project_apis = false.
+gcloud services enable sqladmin.googleapis.com servicenetworking.googleapis.com --project <project>
+
+# Private Services Access: once per VPC, needed for a Cloud SQL private IP.
+gcloud compute addresses create google-managed-services-<vpc> --project <project> \
   --global --purpose=VPC_PEERING --prefix-length=16 --network=<vpc>
-gcloud services vpc-peerings connect \
+gcloud services vpc-peerings connect --project <project> \
   --service=servicenetworking.googleapis.com \
   --ranges=google-managed-services-<vpc> --network=<vpc>
 
 # Postgres 16, private IP only.
 # GOTCHA: the default edition (ENTERPRISE_PLUS) REJECTS db-custom-* tiers —
 # pass --edition=ENTERPRISE explicitly (also cheaper, fine for most installs).
-gcloud sql instances create <name> \
+gcloud sql instances create <name> --project <project> \
   --database-version=POSTGRES_16 --edition=ENTERPRISE \
   --tier=db-custom-2-7680 --region=<region> \
   --network=projects/<project>/global/networks/<vpc> --no-assign-ip \
   --availability-type=ZONAL  # or REGIONAL for HA
 
-gcloud sql databases create marshal --instance=<name>
-gcloud sql users create marshal --instance=<name> --password=<generated>
+gcloud sql databases create marshal --instance=<name> --project <project>
+gcloud sql users create marshal --instance=<name> --project <project> --prompt-for-password
+gcloud sql instances describe <name> --project <project> --format='value(ipAddresses[0].ipAddress)'
 # database_url = postgres://marshal:<password>@<private-ip>:5432/marshal?sslmode=require
 ```
+
+The instance, the address range and the peering are yours, not Terraform's, so
+a destroy leaves them in place. A teardown removes them by hand, before the
+destroy: see [Tearing down](#tearing-down-terraform-destroy).
 
 ## Registry (pull-through cache) — on by default, required for a real install
 
@@ -985,10 +1023,11 @@ take a few minutes.
    or archived. Connect the audit bucket in *Settings > Auditing* the same way.
 3. **Publish a first stack.** A new install has no stacks or manifests, so *New
    space* has nothing to offer and `marshal spaces new` stops with
-   `a manifest is required to create a space`. As the owner: Marketplace, install
-   a stack such as `default-engineering` and **publish** it (it installs
-   unpublished), then *New space* > *Create a manifest* from it. The page with
-   screenshots is [Publish your first stack](https://docs.marshal.codes/getting-started/owner).
+   `a manifest is required to create a space`. As the owner: *Marketplace* >
+   *Stacks*, **Install stack** on `default-engineering` (it installs the packages
+   the stack needs and creates a draft), then *Stacks* > open the draft >
+   **Publish v1**. Then *New space* > *Create a manifest* from it. The same steps
+   are in [Publish your first stack](https://docs.marshal.codes/getting-started/owner#publish-your-first-stack).
 
 ## If an apply is interrupted
 
@@ -996,13 +1035,44 @@ Expired credentials, a closed laptop or a timeout can stop an apply partway. The
 resources created so far are in state, so run `terraform plan` before you apply
 again and read it: a cluster or node pool whose create did not finish is
 **tainted**, and the next apply destroys and recreates it (several minutes, and
-anything on it). If the cluster is up and healthy, take it out of the plan with
-`terraform untaint google_container_cluster.this[0]` (the name is in the plan)
-and apply again. Refresh `GOOGLE_OAUTH_ACCESS_TOKEN` first if you use one.
+anything on it). If the cluster is up and healthy
+(`gcloud container clusters describe <cluster> --location <loc> --format='value(status)'`
+says `RUNNING`), take it out of the plan with
+`terraform untaint 'google_container_cluster.this[0]'` and apply again. Refresh
+`GOOGLE_OAUTH_ACCESS_TOKEN` first if you use one.
+
+### If the cluster create failed
+
+A cluster whose create failed (status `ERROR`, or `GCE_STOCKOUT` in the apply's
+error) is tainted too, but the replacement cannot start:
+`deletion_protection` is still `true` in state, so the plan's destroy step stops
+with `Cannot destroy cluster because deletion_protection is set to true`. Setting
+it `false` in tfvars does not help, because a tainted resource is destroyed with
+the values in state. Delete the failed cluster with `gcloud`, then apply again;
+the refresh sees it is gone and creates a new one:
+
+```bash
+gcloud container clusters delete <cluster> --location <location> --project <project>
+terraform apply
+```
+
+**`GCE_STOCKOUT` on a regional cluster.** A regional `location` (for example
+`europe-west1`) needs capacity for every node pool in every zone at once, and the
+create fails after a few minutes when one zone has none, even while single VMs
+in the region still create. Measured: two regional creates failed at about 3m50s;
+the same pools with a zonal `location` (`europe-west1-b`) came up in 8m22s. Use a
+zonal `location`, or another region, and retry after deleting the failed cluster
+as above. A zonal cluster also needs a third of the regional quota.
 
 ## Day-2 upgrade
 
-Bump `chart_version` and `terraform apply`. Roll back with
+Check out the new installer tag and set `chart_version`. Then answer every
+`capabilities.yaml` entry newer than your version in `terraform.tfvars` (the
+`install-marshal` skill asks them one by one): pin your `spaces_pools` sizes so
+no pool is replaced. Set `pin_bundled_datastores = false` next to
+`taint_control_plane_pool = true` only when this upgrade turns `taint_control_plane_pool` on (from 0.29 or older, or it was `false`) and the bundled Redis or Postgres runs outside the control-plane pool today; check with `kubectl get pod -n marshal marshal-redis-master-0 marshal-postgresql-0 -o wide`. An install already running the taint keeps the default.
+Then `terraform init -upgrade`, `terraform plan` (it should replace nothing you
+did not choose), and `terraform apply`. Roll back with
 `helm rollback marshal -n marshal`.
 
 **Upgrading this flavor's code from a version without
@@ -1046,20 +1116,62 @@ secret (space manifests carry per-space keys) and delete it the same day.
 
 ## Tearing down (`terraform destroy`)
 
-A disposable cluster needs `deletion_protection = false` applied **before**
-the destroy (the destroy reads it from state, not from tfvars).
+One procedure, in this order. The settings in step 2 are read from **state**, not
+from tfvars, so they only count once they have been applied.
 
-`terraform destroy` is one run. The load balancer GKE built for the chart's
-Ingress (or Gateway) is not in Terraform's state, but its forwarding rules hold
-the static IP and the proxy-only subnet, and GKE deletes them only while the
-cluster still exists. So the destroy goes in this order: the release and its
-namespace (the namespace delete waits, up to 15 minutes, for the Ingress and its
-GKE finalizer); then `terraform_data.ingress_lb_released`, which polls
-`gcloud compute forwarding-rules list` until no rule holds the static IP (up to
-10 minutes, printing what it is waiting for); and only then the cluster, the
-subnet and the IP. Expect those two steps to take a few minutes. The wait needs
-`gcloud` on the machine running the destroy; without it, it says so and carries
-on.
+1. **Delete every space in Marshal.** A running space keeps saving its workspace
+   to the spaces bucket in the background, so it would refill a bucket the
+   destroy is emptying.
+2. **Turn the guardrails off and apply:**
+
+   ```hcl
+   deletion_protection   = false   # a cluster this installer created
+   force_destroy_buckets = true    # empties both buckets (every object and version)
+   ```
+
+   ```bash
+   terraform apply
+   ```
+
+   Without `force_destroy_buckets` the destroy stops on a bucket that holds
+   anything; deleting a space does not empty its snapshot prefix, and the audit
+   bucket is versioned. Leave it `false` for anything you intend to keep.
+3. **With Cloud SQL on a VPC this installer created** (`deploy_cluster = true`,
+   `database_mode = "external"`), delete what you created for it in
+   [Provisioning Cloud SQL yourself](#provisioning-cloud-sql-yourself). The
+   destroy cannot delete the VPC while the peering holds it: it stops after about
+   18 minutes with `network ... already being used by
+   .../addresses/google-managed-services-<vpc>`. Delete the database only when
+   its data is no longer needed:
+
+   ```bash
+   gcloud sql instances delete <name> --project <project>
+   gcloud services vpc-peerings delete --service=servicenetworking.googleapis.com \
+     --network=<vpc> --project <project>
+   gcloud compute addresses delete google-managed-services-<vpc> --global --project <project>
+   ```
+
+   If `vpc-peerings delete` reports the connection is still in use for a few
+   minutes after the instance is gone, remove the peering from the VPC side
+   instead: `gcloud compute networks peerings delete servicenetworking-googleapis-com
+   --network=<vpc> --project <project>`.
+   On your own cluster or network, those are yours and stay.
+4. **Destroy:**
+
+   ```bash
+   terraform destroy
+   ```
+
+   Expect about **15 to 20 minutes**. It deletes the release and its namespace
+   first (the namespace delete waits, up to 15 minutes, for the Ingress and its
+   GKE finalizer); then `terraform_data.ingress_lb_released` polls
+   `gcloud compute forwarding-rules list` until no rule holds the static IP (up
+   to 10 minutes, printing what it is waiting for); and only then the cluster,
+   the subnet, the IP and the VPC. The load balancer GKE built for the Ingress
+   (or Gateway) is not in Terraform's state, but its forwarding rules hold the
+   static IP and the proxy-only subnet, and GKE deletes them only while the
+   cluster still exists, which is why the order matters. The wait needs `gcloud`
+   on the machine running the destroy; without it, it says so and carries on.
 
 If a destroy still stops on `resourceInUseByAnotherResource` for the address
 or the proxy-only subnet (no `gcloud`, an install without the static IP
@@ -1075,10 +1187,10 @@ gcloud compute forwarding-rules delete <name> --region <region> --project <proje
 terraform destroy
 ```
 
-Buckets created with `create_*_persistence_bucket` are not force-destroyed:
-empty them first, or the destroy stops on them.
-
 A destroy that finishes prints `Warning: Helm uninstall returned an information
 message ... [Secret] marshal-app-secrets kept due to the resource policy`. That
 is expected: the chart keeps its secrets object on uninstall, and the cluster is
 deleted a few steps later, so nothing is left behind.
+
+Afterwards, `gcloud container clusters list`, `gcloud sql instances list` and
+`gcloud storage buckets list` in the project should show nothing of this install.

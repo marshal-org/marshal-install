@@ -13,6 +13,13 @@
 # This just provisions the storage + access so that Day-2 step has somewhere
 # to point at.
 
+variable "force_destroy_buckets" {
+  description = "true = `terraform destroy` empties the audit and spaces buckets (every object and every version) before deleting them. false (default) = destroy stops on a bucket that holds anything, which a used install always does: deleting a space in Marshal does not empty its snapshot prefix. Set it to true and APPLY before a destroy, because destroy reads it from state rather than tfvars, and delete the spaces in Marshal first so a running one cannot write to the bucket again. Leave false for anything you intend to keep: the audit bucket is compliance data."
+  type        = bool
+  default     = false
+  nullable    = false
+}
+
 variable "create_audit_persistence_bucket" {
   description = "Create the audit-persistence GCS bucket (compliance export) + bind it to the api's KSA via Workload Identity (roles/storage.objectAdmin). false (default) creates nothing — bring your own bucket/credentials instead."
   type        = bool
@@ -74,7 +81,7 @@ resource "google_storage_bucket" "audit_persistence" {
   name                        = local.audit_persistence_bucket_name
   location                    = local.storage_buckets_location
   uniform_bucket_level_access = true
-  force_destroy               = false
+  force_destroy               = var.force_destroy_buckets
 
   versioning {
     enabled = true
@@ -89,7 +96,7 @@ resource "google_storage_bucket" "spaces_persistence" {
   name                        = local.spaces_persistence_bucket_name
   location                    = local.storage_buckets_location
   uniform_bucket_level_access = true
-  force_destroy               = false
+  force_destroy               = var.force_destroy_buckets
 
   depends_on = [google_project_service.required]
 }

@@ -56,7 +56,8 @@ scripts/preflight-aws.sh --region eu-west-1 \
 It checks the things that actually derail an install: whether those subnets are
 really private, whether they have a route out to pull images, whether they
 carry the load balancer tags, how many free IP addresses they have (every pod
-takes one), AZ coverage, your on-demand vCPU quota, whether the pinned
+takes one), AZ coverage, your on-demand vCPU quota and how much of it is
+already in use, a free Elastic IP for the NAT gateway, whether the pinned
 Kubernetes and Postgres versions exist in your region, and whether your DNS
 zone is in Route53. Pass `--help` for every option.
 
@@ -91,7 +92,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.32.0 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.33.1 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -174,4 +175,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.32.0`, published as `v0.32.0`.
+Generated for Marshal chart version `0.33.1`, published as `v0.33.1`.

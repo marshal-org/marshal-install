@@ -4,7 +4,8 @@
 # by default and writes the pull token to a secret), and the README never said
 # to enable it by hand. Each API is listed only when something the current
 # settings create actually calls it, so an install never gets an API it does
-# not use.
+# not use. The one exception is the Cloud SQL pair below, which the README's
+# documented database steps call.
 #
 # Never disabled on destroy: something else in the project may use the same
 # API, and turning off compute or container under a running workload is not a
@@ -15,7 +16,7 @@
 # where it was first added; moving it would move its state address.
 
 variable "enable_project_apis" {
-  description = "Enable the Google APIs this install calls (Compute Engine, Kubernetes Engine, Artifact Registry, Secret Manager, IAM, IAM Credentials, Cloud Storage, Certificate Manager), each only when a setting that needs it is on. true (default) makes a fresh project work in one apply. Set false when your organization enables APIs centrally and the identity running Terraform has no serviceusage.services.enable permission; then enable them yourself first (see the README)."
+  description = "Enable the Google APIs this install calls (Compute Engine, Kubernetes Engine, Artifact Registry, Secret Manager, IAM, IAM Credentials, Cloud Storage, Certificate Manager), and, with database_mode = \"external\" on a VPC this install creates, the two the Cloud SQL steps in the README need (Cloud SQL Admin, Service Networking), each only when a setting that needs it is on. true (default) makes a fresh project work in one apply. Set false when your organization enables APIs centrally and the identity running Terraform has no serviceusage.services.enable permission; then enable them yourself first (see the README)."
   type        = bool
   default     = true
   nullable    = false
@@ -35,6 +36,17 @@ locals {
     local.create_any_storage_bucket ? "iamcredentials.googleapis.com" : "",
     local.create_any_storage_bucket ? "storage.googleapis.com" : "",
     local.create_managed_cert ? "certificatemanager.googleapis.com" : "",
+    # External Postgres is Cloud SQL with a private IP, which the README has you
+    # create with gcloud. Terraform never calls these two, but a fresh project
+    # has neither on, and `gcloud sql instances create` fails on SERVICE_DISABLED
+    # without them. Enabling them here means an install_marshal = false first
+    # apply (the README's order for a new cluster) leaves the project ready for
+    # those commands.
+    # Only on a VPC this root creates: there the README's order needs them before
+    # Cloud SQL exists. A reused cluster or network already has its database, so
+    # its upgrade adds no new API resources.
+    local.provision && var.create_network && var.database_mode == "external" ? "sqladmin.googleapis.com" : "",
+    local.provision && var.create_network && var.database_mode == "external" ? "servicenetworking.googleapis.com" : "",
   ])) : toset([])
 }
 

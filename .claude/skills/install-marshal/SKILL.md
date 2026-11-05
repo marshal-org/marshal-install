@@ -113,6 +113,14 @@ the private subnets**, not DNS. In Twingate or Tailscale that means the connecto
 or subnet router runs inside the VPC and advertises that CIDR. A tunnel that only
 forwards the hostname will still fail.
 
+**Do they have DNS for the hostname?** `ingress_host` is required at plan time
+but only has to be a name. For a trial without their own DNS, any placeholder
+(for example `marshal.trial.internal`) works: they reach the app over
+`kubectl port-forward -n marshal svc/web 8080:80` and `http://localhost:8080`,
+which needs no DNS and no route to the load balancer (section 5). The
+`https://<host>` links in the output work only once that name resolves to the
+load balancer and their machine can reach it.
+
 If they are reusing a cluster, three things must already be in place and each
 fails **silently** if missing: the AWS Load Balancer Controller (or an ingress
 controller on GKE), the EBS CSI driver on EKS, and a reachable Postgres 16.
@@ -125,11 +133,12 @@ pull token in a file only you can read, so it never reaches your shell history
 or the process list:
 
 ```bash
-umask 077; read -rs MRPT; printf '%s' "$MRPT" > /tmp/mrpt && unset MRPT
+MRPT_FILE=$(umask 077; mktemp)                                   # a new file only you can read
+read -rs MRPT; printf '%s' "$MRPT" > "$MRPT_FILE"; unset MRPT
 scripts/preflight-aws.sh --region <region> \
   --ingress-host <hostname> \
-  --deployment-id <dep> --pull-token-file /tmp/mrpt --chart-version <ver>
-rm /tmp/mrpt
+  --deployment-id <dep> --pull-token-file "$MRPT_FILE" --chart-version <ver>
+rm -f "$MRPT_FILE"
 ```
 
 Add `--vpc-id` and `--private-subnets` when they are bringing their own
@@ -157,17 +166,24 @@ because each one otherwise fails partway:
 |---|---|
 | Signed in, and Terraform can see it | `gcloud auth list`. Terraform's Google providers read Application Default Credentials (`gcloud auth application-default login`), **not** a plain `gcloud auth login`. If they only did the latter, `export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`. It lasts about an hour, so refresh it before a long apply or destroy. |
 | Billing is on, and they may enable APIs | `gcloud billing projects describe <project>`. The installer enables the APIs it needs (`enable_project_apis`), which needs `serviceusage.services.enable`; if their organization enables APIs centrally, set it `false` and enable them first (the README lists the command). |
-| CPU quota | `gcloud compute project-info describe --project <project> --format=json` and read the `CPUS_ALL_REGIONS` and regional `CPUS` limits. Add up the vCPUs of the control-plane pool (default `e2-standard-8`) and the spaces pool (default `e2-standard-8`) at their **starting** node count, times the number of zones for a regional `location`, and compare. A 32 vCPU project cannot go higher by self-service, so start a quota request first if the pools are sized up. |
+| CPU quota | On a fresh project the Compute API is off and every `gcloud compute` call fails with `SERVICE_DISABLED`, so enable it first: `gcloud services enable compute.googleapis.com --project <project>` (the apply enables it anyway; this only runs it earlier). Then `gcloud compute project-info describe --project <project> --format=json` for `CPUS_ALL_REGIONS`, and `gcloud compute regions describe <region> --project <project> --format=json` for the regional `CPUS` and `SSD_TOTAL_GB`. Add up the vCPUs of the control-plane pool (default `e2-standard-8`) and the spaces pool (default `e2-standard-8`) at their **starting** node count, times the number of zones for a regional `location`, and compare. A 32 vCPU project cannot go higher by self-service, so start a quota request first if the pools are sized up. |
 | Disk quota | The regional `SSD_TOTAL_GB` quota (often 500 GB) counts `pd-balanced` too. The defaults are a 300 GB spaces disk and a 50 GB control-plane disk, one node of each per zone: for a 3-zone region that is 1050 GB, so ask for 1200 GB or more before the apply. A bigger `disk_size_gb` multiplies it. |
-| Region and zones | `location` is a region or a zone; a region creates one node per zone for each pool, so the quota above is per zone count. |
+| Region and zones | `location` is a region or a zone; a region creates one node per zone for each pool, so the quota above is per zone count. A regional create needs capacity in every zone at once: if it fails with `GCE_STOCKOUT` (measured at about 3m50s, twice, in `europe-west1`), use a zonal `location` such as `europe-west1-b`, which came up in 8m22s. Recover from the failed create as in section 4. |
 
 ## 3. Fill in the configuration
 
 ```bash
 cd aws-eks           # or gcp-gke, or single-node-k3s
+umask 077                    # every file terraform writes from here on is 0600
 cp ../examples/aws-eks.tfvars.example terraform.tfvars    # gcp-gke.tfvars.example on GKE
 chmod 600 terraform.tfvars   # it will hold the licence JWT and the pull token
 ```
+
+A local `terraform.tfstate` holds the same secrets plus the database password,
+and Terraform creates it, and its `.backup`, with the shell's umask, often
+`-rw-rw-r--`. Remote state (section 4) is the answer for anything they keep. On
+local state, a trial included, keep `umask 077` in that shell, and if state
+files already exist run `chmod 600 terraform.tfstate*`.
 
 **On GKE** the values to settle with them, beyond the shared ones: `project_id`,
 `location`, `deploy_cluster = true` for a new cluster, `dns_endpoint_enabled = true`
@@ -178,6 +194,17 @@ nodes' CPU), and
 evaluation `database_mode = "bundled"` runs Postgres in the cluster; anything
 they keep wants Cloud SQL (Postgres 16, private IP) and `database_mode =
 "external"`. `deletion_protection = false` is needed only to destroy later.
+
+**Cloud SQL on a new cluster is two applies.** Cloud SQL's private IP needs the
+VPC, and with `deploy_cluster = true` that VPC is created by the apply. So:
+first apply with `install_marshal = false` (it builds the network and cluster,
+enables the Cloud SQL APIs, and installs nothing; ignore the ArgoCD steps it
+prints), then create Cloud SQL on `<cluster_name>-vpc` with the README's
+"Provisioning Cloud SQL yourself" commands, then set `database_url` and
+`install_marshal = true` and apply again. Never `-target` the VPC instead. The
+plan stops if `database_url` is empty while `install_marshal` is true. On their
+own cluster or network the VPC exists, so Cloud SQL comes first and the install
+is one apply.
 
 **Agree `cluster_name` with them before you write it.** Do not invent one, and
 do not reach for something like `marshal-test`: it is the name of real
@@ -210,23 +237,29 @@ Ask about them every time, explain the trade, and recommend turning on both:
 Before they decide, tell them how each bucket is operated:
 
 **Which identity uses the bucket.** No keys are created or stored. The installer
-creates one storage identity and binds it to Marshal's Kubernetes service
+creates the storage identities and binds them to Marshal's Kubernetes service
 accounts:
 
-- **EKS:** an IAM role `<cluster_name>-storage-role`, bound through IRSA.
-- **GKE:** a Google service account `<cluster_name>-storage`, bound through
-  Workload Identity.
+- **EKS:** one IAM role `<cluster_name>-storage-role`, bound through IRSA.
+- **GKE:** two Google service accounts, bound through Workload Identity:
+  `<cluster_name>-storage` for the api (either bucket), and
+  `<cluster_name>-sup-storage` (the cluster name cut to 18 characters) for the
+  supervisor, with access to the spaces bucket only, because session pods run
+  agent code and must not reach the audit bucket.
 
 Audit uses the **api** service account (`marshal-api` in the `marshal`
 namespace). Space storage uses the api **and** the **supervisor**
 (`marshal-supervisor` in `marshal-spaces`), because the supervisor does the
 snapshot reads and writes inside each session pod. The grants are object-level,
-on that bucket only.
+on each bucket only.
 
 **Who turns it on.** The bucket is the storage. The feature is switched on in
 Marshal by an **owner or admin** after the install, per organization:
 
 - **Settings > Space Storage:** choose the provider and enter the bucket name.
+  On S3 also enter the **Region**: the bucket's own region, which for an
+  installer-created bucket is the cluster's `region`. A wrong one fails the
+  connection test with `PermanentRedirect` (an S3 301).
 - **Settings > Auditing:** in the **Storage** card, choose the provider, enter
   the bucket name, and select **Save & enable**.
 
@@ -326,6 +359,15 @@ everything already on it. If the cluster is healthy
 'aws_eks_cluster.this[0]'` (GKE: `google_container_cluster.this[0]`) takes it out of
 the plan, and the apply then carries on from where it stopped.
 
+**A GKE cluster whose create failed** (`ERROR`, or `GCE_STOCKOUT` in the apply)
+cannot be replaced by the next apply: the destroy half of the replacement stops on
+`Cannot destroy cluster because deletion_protection is set to true`, because a
+tainted resource is destroyed with the values in state, and setting
+`deletion_protection = false` in tfvars does not change state. Delete it with
+`gcloud container clusters delete <cluster_name> --location <location> --project <project>`
+and apply again; the refresh sees it gone and creates a new one. Change
+`location` first if the cause was a stockout.
+
 On the bastion path, the bastion runs the whole install, so give it the
 credentials for that job and delete it when the install is done. Do not run half
 the install on one machine and half on another: the two share nothing but the
@@ -409,16 +451,23 @@ says "already set up", someone claimed it already: stop and ask them.
 Do these with the owner, in this order, before you call the install finished.
 
 1. **Connect the spaces bucket first, if there is one:** *Settings > Space
-   Storage*, then *Save & enable* (via the API, `PUT /api/org/space-storage` and
-   then `PATCH /api/org/space-storage/enabled` with `{"enabled":true}`; the PUT
-   alone leaves it disabled). **A space created before this still loses its
+   Storage*, then *Save & enable*. On S3, set **Region** to the bucket's region
+   (the cluster's `region`). Via the API, `PUT /api/org/space-storage` with
+   `{"provider":"s3","bucket":"<bucket>","region":"<region>","path_prefix":"space-volumes"}`
+   (`"provider":"gcs"` and no region on GKE), then
+   `PATCH /api/org/space-storage/enabled` with `{"enabled":true}`; the PUT alone
+   leaves it disabled. **A space created before this still loses its
    workspace when stopped**, even after you connect the bucket, so connect it
    before anyone creates one.
-2. **Marketplace:** install a stack, for example `default-engineering`, and
-   **publish** it. A new install has **no stacks and no manifests**, so *New
-   space* has nothing to offer and `marshal spaces new` stops with `a manifest is
-   required to create a space`; the CLI cannot create either one yet. A stack
-   installs unpublished and is invisible to manifests until published.
+2. **Marketplace > Stacks:** **Install stack** on `default-engineering`. It
+   installs the packages the stack needs and creates a draft stack. Then
+   *Stacks* > open the draft > **Publish v1**. A new install has **no stacks and
+   no manifests**, so *New space* has nothing to offer and `marshal spaces new`
+   stops with `a manifest is required to create a space`. A stack installs
+   unpublished and is invisible to manifests until published. The docs'
+   [Publish your first stack](https://docs.marshal.codes/getting-started/owner#publish-your-first-stack)
+   is the same flow, and the API calls for it are on
+   https://docs.marshal.codes/day-2 ("Set up from a terminal").
 3. **New space > Create a manifest**, from that stack, then launch the space.
 
 Then launch a space, stop it, resume it, and confirm a file written before the
@@ -466,87 +515,138 @@ this **before** `terraform plan`, every time:
 5. **Write the answer into `terraform.tfvars` explicitly**, whichever way they go,
    using the entry's `enable` / `disable` text. An explicit value means the next
    upgrade will not ask again and the default can never move under you.
-6. **Only then plan.** Read the plan against the answers: a disruptive entry the
+6. **Only then plan**, after `terraform init -upgrade` (the lock file is not in the
+   repository, so a plain `init` keeps the old provider versions and can refuse the
+   new tag's constraints). Read the plan against the answers: a disruptive entry the
    customer chose to keep must show no replacement. If the plan replaces a node group
    or pool they did not choose to change, stop and fix the tfvars.
 7. After the apply and the checks in section 5, go back to the `when: after` entries
    and ask about them.
+
+**Bundled datastores and the control-plane taint.** On an install upgraded from a
+version where `taint_control_plane_pool` was off, with `redis_mode` or
+`database_mode = "bundled"` and no `node_availability_zone`, write
+`pin_bundled_datastores = false` with the taint. Check first:
+`kubectl get pod -n marshal marshal-redis-master-0 marshal-postgresql-0 -o wide` and `kubectl get nodes -l workload=control-plane`. If they already run on
+a control-plane node (an install that ran the taint before), keep the default
+`true`: `false` would move them off it into the same Pending state. With `false`
+they stay put only until their next reschedule, which then needs an untainted node
+in the volume's zone. Otherwise the apply moves Redis
+(or Postgres) to the control-plane node, whose zone often differs from its volume's,
+and the pod stays Pending with `didn't match PersistentVolume's node affinity`: Redis
+down, the api crash-looping on `connect to redis ... connection refused`, the helm
+upgrade waiting out its timeout. Measured on an EKS 0.29.0 upgrade: about 5 minutes
+of API outage. If it already happened with Redis: its data is rebuildable, so
+`kubectl -n marshal delete pvc redis-data-marshal-redis-master-0` and delete the
+`marshal-redis-master-0` pod; it starts fresh in the right zone. Never do that to a
+bundled Postgres: set `pin_bundled_datastores = false` and apply instead, which puts
+it back next to its volume.
+
+**What a 0.29 to 0.32 plan should show** once the questions are answered (measured):
+`7 to add, 4 to change, 1 to destroy`, the destroy being the RDS security group,
+which is replaced by a new one attached first (`name` became `name_prefix`; the
+database moved in 1m23s with no errors). Changing only `chart_version` instead gave
+`8 to add, 3 to change, 2 to destroy`, one of them the spaces node group: stop and
+pin the sizes.
+
+**Quota.** The recommendation is now 72 vCPU (it was 40). An install sized for 40
+upgrades fine, but the autoscaler's default maximums then exceed the quota; say so
+and suggest the increase.
+
+**Spaces on the control-plane node.** With the taint off, spaces could start on the
+control-plane node too. When moving spaces to a new node group, `kubectl get pods -n
+marshal-spaces -o wide` shows where each runs; ask the owners of those on a
+control-plane node to stop and resume as well.
 
 Never answer these for the customer, and never skip an entry because its default
 looks harmless. Ask, then record the answer.
 
 ## 6. Tearing one down
 
-**On GKE it is simpler:** set `deletion_protection = false` in `terraform.tfvars`
-and `terraform apply` it (the destroy reads it from state), empty the storage
-buckets (`create_*_persistence_bucket` buckets are not force-destroyed), delete
-the spaces in Marshal, then run one `terraform destroy`. It deletes the release
-and its namespace first, waits for GKE to release the load balancer's forwarding
-rules, and only then removes the cluster, subnet and static IP; expect about 15
-minutes. It prints `Warning: Helm uninstall returned an information message ...
-marshal-app-secrets kept due to the resource policy`; that is expected. If it stops
-on `resourceInUseByAnotherResource`, delete the leftover `k8s2-*` / `gkegw1-*`
-forwarding rules and run it again (the README's "Tearing down" has the commands).
-The rest of this section is the AWS procedure.
+One procedure on both clouds, in this order. `terraform destroy` on its own does
+not do it, and the order is not optional: on AWS the wrong order **deadlocks with
+no error message at all**, leaving the cluster and the database up and billing.
 
-`terraform destroy` on its own does not do it, and the order is not optional.
-Get it wrong and the destroy **deadlocks with no error message at all**, leaving
-the cluster and the database up and billing.
-
-If they reached the cluster through a CIDR-locked public endpoint, **check it is
-still open before you start**. The whole teardown runs terraform and `kubectl`
-against the API, and step 2 is the first thing that fails if it is private and
+If they reached an EKS cluster through a CIDR-locked public endpoint, **check it
+is still open before you start**. The whole teardown runs terraform and `kubectl`
+against the API, and step 3 is the first thing that fails if it is private and
 you are outside the VPC.
 
 ```bash
-# 1. Turn off BOTH database guardrails, in terraform.tfvars:
+# 1. Delete every space in Marshal FIRST. A running space keeps saving its
+#    workspace to the spaces bucket in the background and would refill a bucket
+#    the destroy is emptying. (Each owner's spaces: marshal spaces list, then
+#    marshal spaces delete <id> --yes.)
+
+# 2. Turn the guardrails off, in terraform.tfvars. Each is read from STATE by the
+#    destroy, so a value that has not been through an apply has no effect.
+force_destroy_buckets   = true        # both clouds, when the buckets are on: empties them
+# AWS, with create_rds:
 rds_deletion_protection = false
 rds_skip_final_snapshot = true        # leave this out to KEEP a final snapshot
+# GKE, a cluster the installer created:
+deletion_protection     = false
 
-# 2. Apply them. Setting them is not enough on its own: `terraform destroy`
-#    reads both values out of STATE, not out of your tfvars, so a flag that has
-#    never been through an apply has no effect and you get the snapshot anyway.
+# 3. Apply them.
 terraform apply
 
-# 3. NOW delete the workload, and not before. This takes the Ingress and its
-#    finalizer away before terraform can revoke the load balancer controller's
-#    IAM policy, which is what otherwise deadlocks the destroy, and it lets the
-#    EBS CSI driver delete the PVC volumes while it still has permission to.
-# The chart owns two: the release namespace and "<release>-spaces", where
-#    session pods live. Deleting only the first leaves the second behind, which
-#    does not matter when step 4 destroys the cluster, and does matter on the
-#    reuse path (deploy_cluster = false) where the cluster outlives the destroy.
+# 4. AWS only: NOW delete the workload, and not before. This takes the Ingress
+#    and its finalizer away before terraform can revoke the load balancer
+#    controller's IAM policy, which is what otherwise deadlocks the destroy, and
+#    it lets the EBS CSI driver delete the PVC volumes while it still has
+#    permission to. The chart owns two namespaces: the release namespace and
+#    "<release>-spaces", where session pods live. Deleting only the first leaves
+#    the second behind, which matters on the reuse path (deploy_cluster = false)
+#    where the cluster outlives the destroy.
 kubectl delete namespace marshal marshal-spaces   # about a minute; EBS volumes go too
+#    GKE only, with Cloud SQL on a VPC the installer created: delete the
+#    instance, the servicenetworking peering and the PSA range (the README's
+#    "Tearing down" has the three commands). The destroy cannot delete the VPC
+#    while they hold it, and they bill until removed.
 
-# 4. Then destroy.
+# 5. Then destroy.
 terraform destroy
 ```
 
-**Do not move step 3 to the front.** Terraform owns the Helm release, so once
-the namespace is gone the apply in step 2 sees the release as deleted and
+**Expected durations**, so a long wait is not mistaken for a hang: about **12
+minutes** on EKS (measured: 12m05s, 59 resources; the last node group takes about
+8 of them, because its CoreDNS pods' disruption budget holds the drain until EKS
+stops waiting), and about **15 to 20 minutes** on GKE. On GKE the destroy deletes
+the release and its namespace first, waits for GKE to release the load
+balancer's forwarding rules, and only then removes the cluster, subnet, static IP
+and VPC. It prints `Warning: Helm uninstall returned an information message ...
+marshal-app-secrets kept due to the resource policy`; that is expected. If it
+stops on `resourceInUseByAnotherResource`, delete the leftover `k8s2-*` /
+`gkegw1-*` forwarding rules and run it again. If it stops after about 18 minutes
+on `network ... already being used by .../addresses/google-managed-services-<vpc>`,
+step 4's Cloud SQL cleanup was skipped: do it and destroy again. The rest of this
+section is AWS detail.
+
+**Do not move step 4 to the front.** Terraform owns the Helm release, so once
+the namespace is gone the apply in step 3 sees the release as deleted and
 **reinstalls the entire product**. Measured on a real teardown: `Plan: 5 to add,
 1 to change`, which put back the load balancer, three target groups, two
 controller-created security groups and the Redis volume roughly two minutes
 before the destroy ran. Flags first, apply, then the namespace.
 
-Step 2 is normally a quick in-place database change. On a cluster whose install
+Step 3 is normally a quick in-place database change. On a cluster whose install
 failed partway it can also replace a tainted addon, so read the plan instead of
 assuming.
 
 **What outlives the destroy**, because Terraform never owned any of it:
 
 - **A final RDS snapshot**, `<cluster_name>-postgres-final`, unless you skipped
-  it in step 1. Keep it if the data matters. It also blocks a rebuild under the
+  it in step 2. Keep it if the data matters. It also blocks a rebuild under the
   same cluster name, because the snapshot name collides.
-- **EBS volumes from PersistentVolumeClaims**, if you skipped step 3.
+- **EBS volumes from PersistentVolumeClaims**, if you skipped step 4.
 - **The load balancer, its target groups, and any security group the controller
   created**, if the controller lost its IAM policy before it finished its own
-  cleanup. Step 3 prevents this as well.
+  cleanup. Step 4 prevents this as well.
 
 Subnet tags your subnets already carried are **not** in that list and are not at
 risk: the installer skips any tag that was already there, so a destroy leaves it
 alone. `terraform output subnet_tags_left_as_yours` lists them, but run it
-**before** step 4: once the destroy has finished the state is empty and the same
+**before** step 5: once the destroy has finished the state is empty and the same
 command prints `Warning: No outputs found` and still exits 0.
 
 Find anything that did survive. **Every one of these is filtered by
@@ -600,6 +700,14 @@ aws rds delete-db-snapshot --db-snapshot-identifier <name>
   `aws_vpc` data source, and the line number is just where that data source is
   referenced. Harmless either way, nothing to change, and do not let anyone
   edit a `.tf` file over it.
+- **`Warning: Deprecated value used` on `providers.tf` line 46 (GKE, a cluster
+  the installer creates).** Appears on runs once the cluster exists (seen on an
+  apply and a destroy). Its last line says
+  `The deprecation originates from
+  google_container_cluster.this[0].binary_authorization[0].enabled`: line 46 reads
+  the cluster's endpoint out of the whole cluster object, and that object carries
+  a field the Google provider marks deprecated. The installer never sets it.
+  Harmless, nothing to change.
 - **`RESTARTS 1` on an api pod right after a fresh install.** The container
   exits once during startup and recovers by itself. Seen on clean installs that
   are otherwise perfect, with every pod `Running` and the licence `LICENSED`.
@@ -639,6 +747,10 @@ aws rds delete-db-snapshot --db-snapshot-identifier <name>
   Controller's Service webhook. A plain `terraform apply` again fixes it, and the
   warning Terraform prints about purging the addon's configuration is harmless here,
   because the addon never finished being created and carries no configuration to lose.
+- **After an upgrade, Redis is `Pending` with `didn't match PersistentVolume's node
+  affinity` and the api crash-loops on `connect to redis`.** The control-plane taint
+  moved the bundled Redis to a node in another zone from its volume. See "Bundled
+  datastores and the control-plane taint" under "Upgrading an existing install".
 - **`terraform destroy` fails on the database.** Deletion protection is on by
   design. Set `rds_deletion_protection = false`, apply that, then destroy.
   Doing it in the other order tears down everything else first and then stops.
@@ -679,7 +791,7 @@ aws rds delete-db-snapshot --db-snapshot-identifier <name>
      Without this the controller is in exponential backoff and can sit silent for
      fifteen minutes or more, with nothing in its log to say so. After the restart
      the finalizer clears in seconds.
-  5. Then start section 6 again, from step 1.
+  5. Then start section 6 again, from step 2.
 
   Installers from `v0.23.0-r3` onward do not have this failure: the controller's
   policy attachment is now destroyed after the release rather than beside it.

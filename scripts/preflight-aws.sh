@@ -106,7 +106,8 @@ if [ -n "$DEPLOYMENT_ID" ] && [ -n "$PULL_TOKEN" ] && [ -n "$CHART_VERSION" ]; t
     warn "chart pull" "helm not installed, skipped"
   else
     tmp="$(mktemp -d)"
-    if out="$(helm registry login registry.marshal.codes --username "$DEPLOYMENT_ID" --password "$PULL_TOKEN" 2>&1)"; then
+    # --password-stdin keeps the token out of the process list.
+    if out="$(printf '%s' "$PULL_TOKEN" | helm registry login registry.marshal.codes --username "$DEPLOYMENT_ID" --password-stdin 2>&1)"; then
       if out="$(helm pull "oci://registry.marshal.codes/marshal-charts/marshal" --version "$CHART_VERSION" -d "$tmp" 2>&1)"; then
         pass "chart pull" "marshal $CHART_VERSION"
       else
@@ -169,11 +170,59 @@ case "$quota" in
     fi ;;
   *)
     q=${quota%.*}
-    if [ "$q" -ge "$QUOTA_NEED" ]; then pass "on-demand vCPU quota" "$q vCPU limit (this is the LIMIT, not free capacity: subtract whatever the account already runs)"
+    if [ "$q" -ge "$QUOTA_NEED" ]; then pass "on-demand vCPU quota" "$q vCPU limit"
     elif [ "$q" -ge "$QUOTA_FLOOR" ]; then warn "on-demand vCPU quota" "$q vCPU: enough to create the cluster ($QUOTA_FLOOR), not to scale it out. The defaults reach 58 fully scaled (66 during a node group update); ask for $QUOTA_NEED"
     else fail "on-demand vCPU quota" "$q vCPU cannot create the default node groups ($QUOTA_FLOOR: two m5.2xlarge). Ask for $QUOTA_NEED"
+    fi
+
+    # The quota is a LIMIT shared with everything else in the account and
+    # region, so the headroom is the limit minus what already runs against it.
+    # L-1216C47A counts running and pending On-Demand instances of the standard
+    # families (A, C, D, H, I, M, R, T, Z); Spot has its own quota. vCPUs are
+    # cores x threads per core, read from the instances themselves, so no
+    # instance-type table is needed.
+    used="$(aws_q ec2 describe-instances \
+              --filters Name=instance-state-name,Values=pending,running \
+              --query 'Reservations[].Instances[?InstanceLifecycle!=`spot`].[InstanceType,CpuOptions.CoreCount,CpuOptions.ThreadsPerCore]' \
+              --output text)"
+    if denied "$used"; then
+      warn "on-demand vCPU in use" "could not read it: $(deny_msg ec2:DescribeInstances "$used")"
+    elif printf '%s' "$used" | grep -qi 'error'; then
+      warn "on-demand vCPU in use" "could not read it: $(err_line "$used")"
+    else
+      inuse="$(printf '%s\n' "$used" | awk '$1 ~ /^[acdhimrtz]/ && $1 !~ /^(inf|hpc|dl|trn|mac)/ && $2 ~ /^[0-9]+$/ { n += $2 * ($3 ~ /^[0-9]+$/ ? $3 : 1) } END { print n + 0 }')"
+      free=$((q - inuse))
+      if [ "$free" -ge "$QUOTA_NEED" ]; then pass "on-demand vCPU in use" "$inuse in use, $free of $q free"
+      elif [ "$free" -ge "$QUOTA_FLOOR" ]; then warn "on-demand vCPU in use" "$inuse in use, so $free of $q is free: enough to create the cluster ($QUOTA_FLOOR), and that, not node_max_size, caps how many spaces can run. Ask for $((inuse + QUOTA_NEED)) to keep $QUOTA_NEED free"
+      else fail "on-demand vCPU in use" "$inuse in use, so only $free of $q is free; the cluster needs $QUOTA_FLOOR to be created. Ask for $((inuse + QUOTA_NEED))"
+      fi
     fi ;;
 esac
+
+# The NAT gateway the installer builds (create_network, the default) needs one
+# Elastic IP, one per AZ with single_nat_gateway = false. EC2-VPC Elastic IPs
+# (L-0263D0A3) default to 5 per region and are often all allocated in a shared
+# account, which fails the apply partway, after the VPC exists.
+if [ -n "$VPC_ID" ]; then
+  skip "elastic IPs" "bringing your own VPC: the installer creates no NAT gateway"
+else
+  eip_limit="$(aws_q service-quotas get-service-quota --service-code ec2 --quota-code L-0263D0A3 \
+                --query 'Quota.Value' --output text)"
+  eip_used="$(aws_q ec2 describe-addresses --query 'length(Addresses)' --output text)"
+  case "$eip_limit:$eip_used" in
+    *[!0-9.:]*|:*|*:)
+      if denied "$eip_limit$eip_used"; then
+        warn "elastic IPs" "could not read them, the call was denied: $(err_line "$eip_limit$eip_used"). The NAT gateway needs 1 free Elastic IP (L-0263D0A3)"
+      else
+        warn "elastic IPs" "could not read them: $(err_line "$eip_limit$eip_used"). The NAT gateway needs 1 free Elastic IP (L-0263D0A3)"
+      fi ;;
+    *)
+      eip_free=$(( ${eip_limit%.*} - eip_used ))
+      if [ "$eip_free" -ge 1 ]; then pass "elastic IPs" "$eip_used of ${eip_limit%.*} allocated, $eip_free free (the NAT gateway needs 1; one per AZ with single_nat_gateway = false)"
+      else fail "elastic IPs" "$eip_used of ${eip_limit%.*} allocated, none free. The NAT gateway needs 1: release an unused one (aws ec2 release-address) or raise L-0263D0A3"
+      fi ;;
+  esac
+fi
 
 # ── VPC ─────────────────────────────────────────────────────────────────────
 if [ -z "$VPC_ID" ]; then

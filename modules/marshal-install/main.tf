@@ -16,6 +16,10 @@
 # =============================================================================
 
 locals {
+  # The ingress URL. next_steps prints it after the port-forward path, because
+  # it only answers once DNS exists and the load balancer is reachable.
+  app_url = "${length(local.effective_ingress_tls) > 0 ? "https" : "http"}://${var.ingress_host}"
+
   # Where session pods run. Mirror the chart's default (<release>-spaces) so the
   # output is accurate even when spaces_namespace is left empty.
   spaces_namespace = var.spaces_namespace != "" ? var.spaces_namespace : "${var.release_name}-spaces"
@@ -182,10 +186,12 @@ locals {
     # their own native fields. Without this they land on the spaces pool
     # (untainted), and their zone-bound EBS/PD volumes then block scaling that
     # pool down.
-    local.redis_bundled && local.control_plane_pinned ? {
+    # pin_bundled_datastores = false leaves them where they are (see its
+    # description: a zone-bound volume cannot follow the pod to another zone).
+    local.redis_bundled && local.control_plane_pinned && var.pin_bundled_datastores ? {
       redis = { master = local.control_plane_scheduling }
     } : {},
-    local.pg_bundled && local.control_plane_pinned ? {
+    local.pg_bundled && local.control_plane_pinned && var.pin_bundled_datastores ? {
       postgresql = { primary = local.control_plane_scheduling }
     } : {},
     local.datastore_values,

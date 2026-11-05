@@ -33,10 +33,27 @@ output "chart_version" {
 
 output "next_steps" {
   description = "Verify + reach the deployment."
+
+  # A hard stop, not a warning: the module writes database_url into the
+  # marshal-db Secret as it is, so an empty one installs an api that cannot
+  # start. With deploy_cluster = true the Cloud SQL instance needs the VPC this
+  # root creates, so the README's order is a first apply with
+  # install_marshal = false, then Cloud SQL, then database_url and
+  # install_marshal = true. That first apply is not blocked here.
+  precondition {
+    condition     = !var.install_marshal || var.database_mode != "external" || var.database_url != ""
+    error_message = "database_mode = \"external\" (the default) requires database_url. Installing a new cluster (deploy_cluster = true) and Cloud SQL needs that cluster's VPC first: apply once with install_marshal = false, create Cloud SQL (README: Provisioning Cloud SQL yourself), then set database_url and install_marshal = true and apply again. For an evaluation, database_mode = \"bundled\" runs Postgres in the cluster instead."
+  }
+
   value = var.install_marshal ? one(module.marshal[*].next_steps) : (
     <<-EOT
       PROVISION ONLY — the cluster is up and nothing is installed. ArgoCD owns
       the release.
+
+      First of two applies, for Cloud SQL on this new VPC? Then skip the steps
+      below: create Cloud SQL now ("Provisioning Cloud SQL yourself" in
+      gcp-gke/README.md), set database_url and install_marshal = true in
+      terraform.tfvars, and run terraform apply again.
 
       1. Get the GKE-derived chart values (do NOT retype them):
            terraform output -raw argocd_derived_values > values-derived.yaml
@@ -127,7 +144,7 @@ output "argocd_derived_values" {
         tolerations  = local.control_plane_tolerations
       }
     } : {},
-    var.redis_mode == "bundled" && var.taint_control_plane_pool ? {
+    var.redis_mode == "bundled" && var.taint_control_plane_pool && var.pin_bundled_datastores ? {
       redis = {
         master = {
           nodeSelector = local.control_plane_node_selector
