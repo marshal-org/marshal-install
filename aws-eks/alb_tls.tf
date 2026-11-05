@@ -114,10 +114,26 @@ resource "aws_route53_record" "acm_validation" {
   type    = each.value.type
   records = [each.value.value]
   ttl     = 60
-  # ACM re-issues on renewal with the same validation record, but a wildcard
-  # SAN and its parent can resolve to the SAME record name, so allow a clobber
-  # rather than failing the apply on a duplicate.
+  # Keyed by domain (the record name is not known until the cert exists, and
+  # for_each keys must be). A wildcard and its parent share one record name, so
+  # allow a clobber rather than failing the apply on a duplicate.
   allow_overwrite = true
+}
+
+locals {
+  # One entry per distinct validation record, for the output only. A wildcard SAN
+  # and its parent domain share one CNAME, so grouping by record name drops the
+  # duplicate.
+  acm_validation_records = var.acm_request_certificate && var.acm_validation_route53_zone_id == "" ? {
+    for name, dvos in {
+      for dvo in aws_acm_certificate.requested[0].domain_validation_options : dvo.resource_record_name => dvo...
+      } : name => {
+      name    = name
+      type    = dvos[0].resource_record_type
+      value   = dvos[0].resource_record_value
+      domains = [for d in dvos : d.domain_name]
+    }
+  } : {}
 }
 
 # Blocks the apply until ACM reports ISSUED. Only exists on the Route53 path:

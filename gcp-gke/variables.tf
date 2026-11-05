@@ -208,9 +208,18 @@ variable "spaces_pools" {
   description = <<-EOT
     Session/space-workload node pools, keyed by a short pool-name suffix
     (used in the pool's GCP name and its workload=<key> node label). Default
-    is a single "spaces" entry matching this variable's pre-generalization
-    defaults (e2-standard-4, 100GB, autoscaling 1-5/zone) — an install that
-    sets nothing here still gets the same single-pool behavior as before.
+    is a single "spaces" entry (e2-standard-8, 300GB, autoscaling 1-5/zone;
+    was e2-standard-4, 100GB).
+
+    Why: the built-in compute classes request 20 GiB of disk per vCPU, and
+    GKE leaves only about half of a boot disk allocatable (300GB gives about
+    146GiB; 100GB gave about 46GiB, roughly 4 sessions). Disk fills before
+    CPU or memory. Keep the 1:4 vCPU:memory shape. 300GB x 3 zones + the
+    control-plane pool needs about 1050GB of regional SSD_TOTAL_GB (default
+    quota 500GB) and 48 vCPU at create; raise both quotas first. Changing machine_type or disk_size_gb on a running pool
+    REPLACES it and stops every space on it. Add a NEW entry beside it instead,
+    cordon the old nodes, let users stop/start their spaces, then remove the
+    old entry once it is empty.
 
     Add more entries for more pools (e.g. a "big" pool with a larger
     machine_type) — each is untainted by default (taint=false), so it's just
@@ -233,22 +242,46 @@ variable "spaces_pools" {
     development clusters. Marking an EXISTING pool spot replaces the pool
     (destroy + create), so set it when the pool is first created. The
     control-plane pool never uses Spot.
+
+    service_account overrides the node SA for this pool only. null (default)
+    = the module-wide node SA (node_service_account, else the dedicated SA
+    from create_node_service_account, else the Compute default). "default" =
+    the project's default Compute Engine SA, which is what pools created
+    before create_node_service_account existed run as: pin every existing
+    pool to "default" before upgrading, or Terraform replaces it. Any other
+    value is a service account email you grant roles to yourself. Changing
+    it on a live pool replaces the pool.
+
+    workload overrides the workload=<key> node label (and the taint value
+    when taint = true). Use it for a replacement pool that must look the same
+    to the scheduler as the pool it replaces, e.g. key "spaces-sa" with
+    workload = "spaces". Defaults to the key.
   EOT
   type = map(object({
-    machine_type   = string
-    disk_size_gb   = number
-    disk_type      = optional(string, "pd-balanced")
-    node_count     = optional(number) # null (default) = autoscaling
-    min_node_count = optional(number, 1)
-    max_node_count = optional(number, 5)
-    taint          = optional(bool, false)
-    pool_name      = optional(string) # see description above
-    spot           = optional(bool, false)
+    machine_type    = string
+    disk_size_gb    = number
+    disk_type       = optional(string, "pd-balanced")
+    node_count      = optional(number) # null (default) = autoscaling
+    min_node_count  = optional(number, 1)
+    max_node_count  = optional(number, 5)
+    taint           = optional(bool, false)
+    pool_name       = optional(string) # see description above
+    spot            = optional(bool, false)
+    service_account = optional(string) # null | "default" | email, see above
+    workload        = optional(string) # node label value, defaults to the key
   }))
+
+  validation {
+    condition = alltrue([
+      for p in values(var.spaces_pools) :
+      p.service_account == null || p.service_account == "default" || can(regex("@", p.service_account))
+    ])
+    error_message = "spaces_pools[*].service_account must be null, \"default\", or a service account email."
+  }
   default = {
     spaces = {
-      machine_type = "e2-standard-4"
-      disk_size_gb = 100
+      machine_type = "e2-standard-8"
+      disk_size_gb = 300
     }
   }
 }
@@ -371,17 +404,25 @@ variable "taint_control_plane_pool" {
     Taint the control-plane pool NoSchedule (key=workload, value=control-plane)
     AND set the module's control_plane_node_selector/tolerations to match
     (see main.tf) -- both derive from this ONE toggle so the taint and the
-    matching chart toleration always land in the SAME apply. DEFAULT FALSE.
+    matching chart toleration always land in the SAME apply. DEFAULT TRUE
+    (was false).
 
-    Still requires the Marshal chart to already be running a
-    version with controlPlane.nodeSelector/tolerations wiring (>= 0.9.0)
-    BEFORE this is ever set true -- an older chart version ignores those
-    values entirely, so its control-plane pods would carry no toleration
-    and become unschedulable the moment the taint lands (an outage). Bump
-    chart_version to >= 0.9.0 first, confirm it's healthy, THEN flip this.
+    Why true: with false, api/gateway/web/marketplace pods (about 4.4 vCPU of
+    requests at the chart baseline) can land on the spaces nodes and take the
+    CPU the sessions need.
+
+    Requires a chart with controlPlane.nodeSelector/tolerations wiring
+    (>= 0.9.0); a check in main.tf warns when chart_version is older, because
+    an older chart ignores those values and its control-plane pods become
+    unschedulable the moment the taint lands (an outage).
+
+    On an existing install the next apply adds the taint and the chart
+    nodeSelector together; the helm upgrade rolls the control-plane pods onto
+    the control-plane pool. Pods already on a spaces node are not evicted by
+    the taint itself. Set false to keep the old behaviour.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "node_pool_max_surge" {
@@ -409,9 +450,64 @@ variable "kubernetes_version" {
 }
 
 variable "node_service_account" {
-  description = "Email of the IAM service account for the nodes. \"\" (default) uses the project's default compute SA. For least privilege, pass a dedicated SA with only logging/monitoring/AR-read roles."
+  description = <<-EOT
+    Email of an IAM service account you manage, for every node pool this flavor
+    creates. Wins over create_node_service_account. You grant its roles
+    yourself: at least roles/container.defaultNodeServiceAccount on the
+    project, plus Artifact Registry read on whatever the nodes pull from (the
+    registry cache is granted for you). "" (default) = the dedicated SA from
+    create_node_service_account, or the project's default Compute Engine SA
+    when that is false. A pool's service account is immutable: read
+    create_node_service_account before changing this on a running install.
+  EOT
   type        = string
   default     = ""
+}
+
+variable "create_node_service_account" {
+  description = <<-EOT
+    Create a dedicated node service account, "<cluster_name>-nodes" (cut to fit
+    the 30-character account ID limit), and run the node pools as it instead of
+    the project's default Compute Engine SA. That default SA usually holds
+    roles/editor, so a container escape on a node would give project control.
+    The dedicated SA gets only roles/container.defaultNodeServiceAccount on the
+    project (logs, metrics, node metadata), roles/artifactregistry.reader on
+    the registry cache repository (create_registry_cache), and
+    roles/serviceusage.serviceUsageConsumer when image_streaming_enabled. Pods
+    do not use it: they get Workload Identity (GKE_METADATA). Ignored when
+    node_service_account is set. true (default). No effect when
+    deploy_cluster = false.
+
+    UPGRADING AN EXISTING INSTALL: GKE cannot change a node pool's service
+    account in place. Terraform replaces the pool, which deletes every node in
+    it and the spaces running there, and with this default it does that to
+    EVERY pool at once. Before upgrading, either set this to false, or pin
+    every existing pool to its current SA (service_account = "default" in each
+    spaces_pools entry, control_plane_service_account = "default"). Then add
+    new pools without the pin and move workloads over (see the README).
+  EOT
+  type        = bool
+  default     = true
+  nullable    = false
+}
+
+variable "control_plane_service_account" {
+  description = <<-EOT
+    Service account override for the control-plane pool only, like
+    service_account in a spaces_pools entry. null (default) = the module-wide
+    node SA (node_service_account, else the dedicated SA, else the Compute
+    default). "default" = the project's default Compute Engine SA, which is
+    what pools created before create_node_service_account existed run as; set
+    it on an existing install so the upgrade does not replace this pool. Any
+    other value is a service account email you grant roles to yourself.
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.control_plane_service_account == null || var.control_plane_service_account == "default" || can(regex("@", var.control_plane_service_account))
+    error_message = "control_plane_service_account must be null, \"default\", or a service account email."
+  }
 }
 
 
@@ -633,7 +729,7 @@ variable "install_marshal" {
     In this mode terraform still COMPUTES every GKE-derived chart value — read
     them with `terraform output -raw argocd_derived_values` and feed that into
     the ArgoCD Application. Do not retype them: the registry endpoints and the
-    storage GSA email are derived, and a wrong supervisor annotation fails only
+    storage GSA emails are derived, and a wrong supervisor annotation fails only
     at session runtime (see buckets.tf).
   EOT
   type        = bool

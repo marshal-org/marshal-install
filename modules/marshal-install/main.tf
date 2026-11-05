@@ -152,6 +152,14 @@ locals {
     authBroker = { url = var.auth_broker_url }
   }
 
+  # nodeSelector/tolerations for everything that belongs on the control-plane
+  # pool. Empty when neither variable is set.
+  control_plane_pinned = length(var.control_plane_node_selector) > 0 || length(var.control_plane_tolerations) > 0
+  control_plane_scheduling = merge(
+    length(var.control_plane_node_selector) == 0 ? {} : { nodeSelector = var.control_plane_node_selector },
+    length(var.control_plane_tolerations) == 0 ? {} : { tolerations = var.control_plane_tolerations },
+  )
+
   # Assemble the full values document. Each local contributes disjoint top-level
   # keys, so a shallow merge is correct and collision-free.
   chart_values = merge(
@@ -168,12 +176,18 @@ locals {
     length(var.supervisor_service_account_annotations) == 0 ? {} : {
       supervisor = { serviceAccount = { annotations = var.supervisor_service_account_annotations } }
     },
-    length(var.control_plane_node_selector) == 0 && length(var.control_plane_tolerations) == 0 ? {} : {
-      controlPlane = merge(
-        length(var.control_plane_node_selector) == 0 ? {} : { nodeSelector = var.control_plane_node_selector },
-        length(var.control_plane_tolerations) == 0 ? {} : { tolerations = var.control_plane_tolerations },
-      )
-    },
+    local.control_plane_pinned ? { controlPlane = local.control_plane_scheduling } : {},
+    # The bundled Redis and Postgres are Bitnami subcharts: the chart's
+    # controlPlane.* block doesn't reach them, so mirror the same pinning onto
+    # their own native fields. Without this they land on the spaces pool
+    # (untainted), and their zone-bound EBS/PD volumes then block scaling that
+    # pool down.
+    local.redis_bundled && local.control_plane_pinned ? {
+      redis = { master = local.control_plane_scheduling }
+    } : {},
+    local.pg_bundled && local.control_plane_pinned ? {
+      postgresql = { primary = local.control_plane_scheduling }
+    } : {},
     local.datastore_values,
     local.license_values,
     local.ingress_values,

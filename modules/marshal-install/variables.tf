@@ -478,7 +478,7 @@ variable "secrets_provider" {
 }
 
 variable "secrets_existing_secret" {
-  description = "secrets_provider=\"existing\": name of a pre-created K8s Secret in `namespace` holding keys JWT_SECRET + KMS_LOCAL_KEY."
+  description = "secrets_provider=\"existing\": name of a pre-created K8s Secret in `namespace` holding keys JWT_SECRET + KMS_LOCAL_KEY, plus SETUP_TOKEN for the first-run owner claim (without it /setup is switched off)."
   type        = string
   default     = ""
 }

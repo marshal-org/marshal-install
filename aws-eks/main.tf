@@ -9,14 +9,23 @@ locals {
   eks_next_steps = <<-EOT
     Open the console from a machine outside the VPC (the ALB is internal):
       kubectl port-forward -n ${var.namespace} svc/web 8080:80
-      then browse http://localhost:8080 and run: marshal login --server http://localhost:8080
+      then browse http://localhost:8080 and run: marshal login --server http://localhost:8080 --password
+      Claim the owner account over the same port-forward:
+      http://localhost:8080/setup#token=<TOKEN>
       Connecting the CLI to a space over this port-forward needs chart 0.29 or newer;
       on older charts run the CLI from inside the VPC (the bastion).
       Details, and an internet-facing option: "Reaching the app" in aws-eks/README.md.
 
-    Object storage: set create_spaces_persistence_bucket = true before relying on
-    stop/resume for real work. Tearing down: see "Tearing down" in aws-eks/README.md
-    (the buckets must be emptied, which force_destroy_buckets does).
+    ${var.create_spaces_persistence_bucket ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created.\n    Settings > Space Storage > provider S3, bucket ${aws_s3_bucket.spaces_persistence[0].bucket}, credential fields empty, Save & enable." : "Space storage is OFF (create_spaces_persistence_bucket = false): a space that is stopped on a size without a persistent disk LOSES its workspace."}
+    ${var.create_audit_persistence_bucket ? "Audit export: Settings > Auditing > Storage > provider S3, bucket ${aws_s3_bucket.audit_persistence[0].bucket}." : ""}
+
+    If an apply is interrupted (expired credentials, a closed laptop), run
+    terraform plan before applying again: a cluster whose create did not finish is
+    tainted, and the next apply replaces it. See "If an apply is interrupted" in
+    aws-eks/README.md.
+
+    Tearing down: see "Tearing down" in aws-eks/README.md (the buckets must be
+    emptied, which force_destroy_buckets does).
   EOT
 
   # Internal vs internet-facing ALB is an annotation, not a separate
@@ -36,6 +45,9 @@ locals {
       "alb.ingress.kubernetes.io/scheme"      = var.internal_ingress ? "internal" : "internet-facing"
       "alb.ingress.kubernetes.io/target-type" = "ip"
     },
+    # Everything below is set only once a certificate is attached (an ISSUED
+    # cert, an imported one, or your own ARN). The redirect must never exist
+    # without the HTTPS listener, or the first apply sends HTTP to a dead :443.
     local.alb_certificate_arn != "" ? {
       "alb.ingress.kubernetes.io/certificate-arn" = local.alb_certificate_arn
       "alb.ingress.kubernetes.io/listen-ports"    = jsonencode([{ HTTP = 80 }, { HTTPS = 443 }])
@@ -163,6 +175,7 @@ module "marshal" {
   # no-op dependency either way.
   depends_on = [
     aws_eks_node_group.spaces,
+    aws_eks_node_group.spaces_extra,
     aws_eks_node_group.control_plane,
     aws_eks_addon.ebs_csi,
     kubernetes_storage_class.gp3,
@@ -177,6 +190,13 @@ module "marshal" {
     aws_security_group_rule.cluster_private_access,
     helm_release.harbor,
     harbor_project.cache,
+    # The database is created alongside the cluster, not behind it (see
+    # database.tf), so nothing else orders the app after the rule that lets the
+    # nodes reach it. Without it the first api start can race the rule and
+    # restart once on a connection refusal.
+    aws_vpc_security_group_ingress_rule.rds_from_cluster,
+    aws_vpc_security_group_ingress_rule.rds_extra,
+    aws_vpc_security_group_egress_rule.rds_all,
   ]
 }
 
@@ -285,5 +305,20 @@ output "_reused_subnets_span_two_azs" {
   precondition {
     condition     = !var.deploy_cluster || var.create_network || length(distinct([for sn in data.aws_subnet.reused_private : sn.availability_zone])) >= 2
     error_message = "EKS requires subnets in at least two availability zones and refuses to create a cluster otherwise. private_subnet_ids covers fewer than two AZs. This holds even when node_availability_zone pins the nodes into one of them."
+  }
+}
+
+# Warn (not fail) when the control-plane taint is on but chart_version predates
+# the chart's controlPlane.nodeSelector/tolerations wiring (0.9.0). A version
+# that is not plain MAJOR.MINOR.PATCH (a pre-release, "latest") is not judged.
+check "taint_needs_chart_0_9" {
+  assert {
+    condition = !var.taint_control_plane_pool || try(
+      tonumber(split(".", var.chart_version)[0]) * 1000000 +
+      tonumber(split(".", var.chart_version)[1]) * 1000 +
+      tonumber(split(".", var.chart_version)[2]) >= 9000,
+      true
+    )
+    error_message = "taint_control_plane_pool is true (the default) but chart_version ${var.chart_version} is older than 0.9.0. Those charts ignore the control-plane nodeSelector/tolerations, so the control-plane pods would become unschedulable once the node group is tainted. Upgrade chart_version first, or set taint_control_plane_pool = false."
   }
 }

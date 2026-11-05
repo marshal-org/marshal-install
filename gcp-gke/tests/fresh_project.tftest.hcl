@@ -1,6 +1,6 @@
 # A fresh project: a 0.28.0 install rehearsal needed two failed
-# applies before the third one worked, came up with an empty control-plane
-# pool, and pulled the bundled datastores from Docker Hub. These pin the fixes.
+# applies before the third one worked, and came up with an empty control-plane
+# pool. These pin the fixes.
 
 mock_provider "google" {
   source = "./tests/mocks"
@@ -79,10 +79,6 @@ run "no_cache_no_secret_manager" {
     condition     = length(google_project_service_identity.artifactregistry) == 0
     error_message = "no service agent without the cache"
   }
-  assert {
-    condition     = length(google_artifact_registry_repository.dockerhub_cache) == 0
-    error_message = "the Docker Hub cache follows create_registry_cache"
-  }
 }
 
 run "pools_start_with_nodes" {
@@ -118,28 +114,7 @@ run "min_zero_pool_starts_empty" {
   }
 }
 
-run "bundled_images_through_the_cache" {
-  command = plan
-
-  assert {
-    condition     = length(google_artifact_registry_repository.dockerhub_cache) == 1
-    error_message = "bundled datastores with the cache on must get the Docker Hub cache"
-  }
-  assert {
-    condition     = google_artifact_registry_repository.dockerhub_cache[0].remote_repository_config[0].docker_repository[0].public_repository == "DOCKER_HUB"
-    error_message = "the cache must front Docker Hub"
-  }
-  assert {
-    condition     = yamldecode(output.argocd_derived_values).redis.image.registry == "europe-west1-docker.pkg.dev/test-project/marshal-dockerhub-cache"
-    error_message = "bundled Redis must pull through the Docker Hub cache"
-  }
-  assert {
-    condition     = yamldecode(output.argocd_derived_values).postgresql.image.registry == "europe-west1-docker.pkg.dev/test-project/marshal-dockerhub-cache"
-    error_message = "bundled Postgres must pull through the Docker Hub cache"
-  }
-}
-
-run "taint_and_cache_share_the_redis_key" {
+run "taint_schedules_bundled_redis_on_the_control_plane" {
   command = plan
 
   variables {
@@ -148,15 +123,11 @@ run "taint_and_cache_share_the_redis_key" {
 
   assert {
     condition     = yamldecode(output.argocd_derived_values).redis.master.nodeSelector.workload == "control-plane"
-    error_message = "the taint's redis scheduling must survive next to the image registry"
-  }
-  assert {
-    condition     = yamldecode(output.argocd_derived_values).redis.image.registry != ""
-    error_message = "the image registry must survive next to the taint's redis scheduling"
+    error_message = "the taint must schedule bundled Redis on the control-plane pool"
   }
 }
 
-run "external_datastores_need_no_dockerhub_cache" {
+run "external_datastores_have_no_redis_values" {
   command = plan
 
   variables {
@@ -166,10 +137,6 @@ run "external_datastores_need_no_dockerhub_cache" {
     redis_url     = "redis://10.0.0.6:6379"
   }
 
-  assert {
-    condition     = length(google_artifact_registry_repository.dockerhub_cache) == 0
-    error_message = "nothing is bundled, so no Docker Hub cache"
-  }
   assert {
     condition     = !contains(keys(yamldecode(output.argocd_derived_values)), "redis")
     error_message = "no redis values when Redis is external"

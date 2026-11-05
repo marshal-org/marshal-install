@@ -41,11 +41,41 @@ output "next_steps" {
       kubectl get pods -n ${var.namespace}
       kubectl logs -n ${var.namespace} -l app.kubernetes.io/component=api -c migrate   # "migrations applied"
       kubectl logs -n ${var.namespace} -l app.kubernetes.io/component=api --tail=-1 | grep "license state"
-      kubectl port-forward -n ${var.namespace} svc/api 8080:8080 &
-      curl -s localhost:8080/api/version
+      kubectl port-forward -n ${var.namespace} svc/web 8080:80 &
+      curl -s localhost:8080/api/version      # the web Service serves the console and the API on one port
 
     Reach it:
       ${length(local.effective_ingress_tls) > 0 ? "https" : "http"}://${var.ingress_host}
+
+    Claim the owner account (first run only):
+      Read the setup token. Terraform never reads it, so it is not in state:
+         kubectl get secret ${var.secrets_existing_secret != "" ? var.secrets_existing_secret : "${var.release_name}-app-secrets"} -n ${var.namespace} -o jsonpath='{.data.SETUP_TOKEN}' | base64 -d
+      Then open this link, with <TOKEN> replaced by that value (the part after # never leaves your browser):
+         ${length(local.effective_ingress_tls) > 0 ? "https" : "http"}://${var.ingress_host}/setup#token=<TOKEN>
+      If the page does not prefill the token (charts older than 0.26), open
+      ${length(local.effective_ingress_tls) > 0 ? "https" : "http"}://${var.ingress_host}/setup and paste the token by hand.
+      If the command prints nothing, the secret has no SETUP_TOKEN key and first-run
+      setup is off: add one (any random string) to the secret and restart the api.
+      The token works until the owner exists, then the page reports "already set up".
+      No browser? Claim it over the API instead. Read the password without echo
+      (it must not contain a " or a \):
+         read -rs PW
+         curl -s -X POST ${length(local.effective_ingress_tls) > 0 ? "https" : "http"}://${var.ingress_host}/api/auth/setup -H 'Content-Type: application/json' -d "{\"token\":\"<TOKEN>\",\"email\":\"you@example.com\",\"password\":\"$PW\",\"org_name\":\"Your Org\"}"
+      A 201 with a session means the owner exists; a second attempt returns 409. Add -k
+      while the certificate is the placeholder. If that host is not reachable from this
+      machine, run it against http://localhost:8080 over the port-forward above.
+      The CLI then logs in with:  marshal login --server <url> --password
+      (plain 'marshal login' opens a browser, which hangs on a machine without one).
+
+    First space (in this order):
+      1. Connect the spaces bucket, if you created one: Settings > Space Storage, then
+         Save & enable. Do this BEFORE the first space: a space created earlier still
+         loses its workspace when it is stopped.
+      2. Marketplace: install a stack (for example default-engineering) and publish it.
+         A new install has no stacks or manifests, so "New space" has nothing to offer
+         until you do.
+      3. New space > Create a manifest, from that stack, then launch the space.
+      Steps with screenshots: https://docs.marshal.codes/getting-started/owner ("Publish your first stack").
     %{if var.preview_domain != ""~}
 
     Previews need DNS too: point a wildcard record *.${var.preview_domain} at the
@@ -69,8 +99,10 @@ output "next_steps" {
 
     ${var.extra_next_steps == "" ? "" : "${trimspace(var.extra_next_steps)}\n\n"}Day-2:
       • Upgrade   — bump chart_version and re-apply.
-      • Object storage for pause/resume is configured per org, not here: an
-        owner or admin connects it in Settings > Space Storage (the API route
-        behind that screen is PUT /api/org/space-storage).
+      • Object storage for stop/resume is configured per org, not here: an
+        owner or admin connects the bucket in Settings > Space Storage and enables it
+        (the API routes behind that screen are PUT /api/org/space-storage, then
+        PATCH /api/org/space-storage/enabled with {"enabled":true}). Until then a stopped
+        space loses its workspace unless it runs on a size with a persistent disk.
   EOT
 }

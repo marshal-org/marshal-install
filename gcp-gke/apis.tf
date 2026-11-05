@@ -27,7 +27,7 @@ locals {
     local.provision ? "container.googleapis.com" : "",
     var.create_registry_cache ? "artifactregistry.googleapis.com" : "",
     var.create_registry_cache ? "secretmanager.googleapis.com" : "",
-    local.create_any_storage_bucket ? "iam.googleapis.com" : "",
+    local.create_any_storage_bucket || local.create_node_sa ? "iam.googleapis.com" : "",
     # Workload Identity's GSA impersonation (the bucket GSA) goes through the
     # IAM Credentials API. Enabling container.googleapis.com turns it on as a
     # dependency (observed on a fresh project), but a reused cluster's project

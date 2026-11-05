@@ -214,6 +214,6 @@ output "audit_persistence_bucket" {
 }
 
 output "spaces_persistence_bucket" {
-  description = "s3:// URL for the spaces-persistence bucket — wire via PUT /api/org/space-storage (provider=s3)."
+  description = "s3:// URL for the spaces-persistence bucket — wire via PUT /api/org/space-storage (provider=s3), then enable it with PATCH /api/org/space-storage/enabled."
   value       = var.create_spaces_persistence_bucket ? "s3://${aws_s3_bucket.spaces_persistence[0].bucket}" : null
 }

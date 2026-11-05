@@ -150,13 +150,14 @@ else
 fi
 
 # L-1216C47A is "Running On-Demand Standard (A,C,D,H,I,M,R,T,Z) instances",
-# counted in vCPUs. With the aws-eks defaults (m5.xlarge spaces nodes 1..5,
+# counted in vCPUs. With the aws-eks defaults (m5.2xlarge spaces nodes 1..5,
 # m5.2xlarge control-plane nodes 1..2, optional t3.micro bastion):
-#   12 at create (one of each), 14 with the bastion, 38 fully scaled.
-# 40 is the figure the docs and the aws-eks README ask for. Keep the three in
+#   16 at create (one of each), 18 with the bastion, 58 fully scaled, and a
+#   node group update launches one replacement node (8) above that: 66.
+# 72 is the figure the docs and the aws-eks README ask for. Keep the three in
 # step: QUOTA_NEED and QUOTA_FLOOR here, the Quickstart table in
 # aws-eks/README.md, and the install skills that quote them.
-QUOTA_NEED=40 QUOTA_FLOOR=12
+QUOTA_NEED=72 QUOTA_FLOOR=16
 quota="$(aws_q service-quotas get-service-quota --service-code ec2 --quota-code L-1216C47A \
           --query 'Quota.Value' --output text)"
 case "$quota" in
@@ -169,8 +170,8 @@ case "$quota" in
   *)
     q=${quota%.*}
     if [ "$q" -ge "$QUOTA_NEED" ]; then pass "on-demand vCPU quota" "$q vCPU limit (this is the LIMIT, not free capacity: subtract whatever the account already runs)"
-    elif [ "$q" -ge "$QUOTA_FLOOR" ]; then warn "on-demand vCPU quota" "$q vCPU: enough to create the cluster ($QUOTA_FLOOR), not to scale it out. The defaults reach 38 fully scaled; ask for $QUOTA_NEED"
-    else fail "on-demand vCPU quota" "$q vCPU cannot create the default node groups ($QUOTA_FLOOR: one m5.xlarge + one m5.2xlarge). Ask for $QUOTA_NEED"
+    elif [ "$q" -ge "$QUOTA_FLOOR" ]; then warn "on-demand vCPU quota" "$q vCPU: enough to create the cluster ($QUOTA_FLOOR), not to scale it out. The defaults reach 58 fully scaled (66 during a node group update); ask for $QUOTA_NEED"
+    else fail "on-demand vCPU quota" "$q vCPU cannot create the default node groups ($QUOTA_FLOOR: two m5.2xlarge). Ask for $QUOTA_NEED"
     fi ;;
 esac
 

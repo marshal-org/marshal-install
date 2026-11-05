@@ -15,6 +15,10 @@ defaults.
 
 - `terraform ≥ 1.5`, `gcloud`, `kubectl`, `helm ≥ 3.14`.
 - Application Default Credentials — `gcloud auth application-default login`.
+  If you signed in only with `gcloud auth login`, Terraform's Google providers
+  do not see that session; export a token instead
+  (`export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`). The
+  token lasts about an hour, so refresh it before a long apply or destroy.
   Reuse needs `container.clusters.get`; provisioning needs `container.admin` +
   compute network admin on the project.
 - **Project APIs are enabled for you** (`enable_project_apis`, default `true`),
@@ -103,10 +107,6 @@ a fixed demo password, no backups and no HA, and it holds everything durable
 (orgs, credentials, audit). Moving an evaluation onto Cloud SQL later is a
 database migration (`pg_dump` / `pg_restore`), not a variable change. Any
 install you intend to keep starts on `database_mode = "external"`.
-
-With `create_registry_cache = true` (the default), both bundled images pull
-through a Docker Hub cache in your project instead of from Docker Hub; see
-[Registry](#registry-pull-through-cache--on-by-default-required-for-a-real-install).
 
 ### `redis_mode = "bundled"` on chart ≤0.5.0: image pull fix required
 
@@ -205,16 +205,16 @@ cert-manager for TLS instead of `tls_mode`? Set `internal_ingress = false`,
 escape hatch — always wins over `tls_mode`) with a cert-manager issuer
 annotation.
 
-### The load balancer takes 5-8 minutes after the apply
+### The load balancer takes 5-15 minutes after the apply
 
 `terraform apply` finishes when the pods are ready, not when the load balancer
-is. GKE then needs about **5-8 minutes** to program the load balancer for the
+is. GKE then needs **5 to 15 minutes** to program the load balancer for the
 Ingress (or Gateway) and pass its health checks; until then the URL times out,
 fails the TLS handshake or answers 502. HTTP comes up first and HTTPS a few
-minutes later: on a fresh install measured on 2026-10-30, the Ingress got its
-address 5m14s after it was created, answered on HTTP within 7 minutes, and on
-HTTPS at 8m11s. This is normal on every new install and after switching
-`ingress_mode`. Watch for it:
+minutes later. Two fresh installs measured a day apart: the Ingress got its
+address 5m14s and about 10 minutes after it was created, and answered on HTTPS
+at 8m11s and about 12.5 minutes. This is normal on every new install and after
+switching `ingress_mode`. Watch for it:
 
 ```bash
 kubectl get ingress -n marshal -w        # ingress_mode = "gateway": kubectl get gateway -n marshal -w
@@ -226,9 +226,28 @@ the backends to turn healthy.
 ### Reaching Marshal before DNS exists (trials)
 
 A trial often starts with an `ingress_host` nobody can resolve yet, and with
-the default internal load balancer, from a laptop outside the VPC. Two working
-paths, both of which keep the real hostname, so cookies, OAuth redirects and the
-CLI's space connect all see the host they expect:
+the default internal load balancer, from a laptop outside the VPC. Three
+working paths:
+
+**Quickest, chart 0.29 or newer: a port-forward, no bastion.** With
+`dns_endpoint_enabled = true` (see
+[Skipping the bastion](#skipping-the-bastion-dns_endpoint_enabled--true)) your
+laptop can reach the control plane, so it can port-forward to the web Service,
+which serves the console and the API on one port:
+
+```bash
+gcloud container clusters get-credentials <cluster> --location <loc> --project <project> --dns-endpoint
+kubectl port-forward -n marshal svc/web 8080:80 &
+# Claim the owner account at http://localhost:8080/setup#token=<TOKEN>, then:
+marshal login --server http://localhost:8080
+```
+
+There is no certificate warning and no `--insecure`, because the traffic is plain
+HTTP over the tunnel. This path does not exercise the load balancer, so it is the
+right way to trial the product but not to prove the ingress; use A or B for that.
+
+The next two keep the real hostname, so cookies, OAuth redirects and the CLI's
+space connect all see the host they expect:
 
 **A. From outside the VPC, through an IAP bastion (keeps the load balancer
 internal).** Use the throwaway bastion from
@@ -269,15 +288,14 @@ This puts Marshal on the internet. Use it only for a disposable trial, never
 for an install you keep, and switch back to `internal_ingress = true` (which
 moves the load balancer and its IP) before real use.
 
-**What does NOT work: `kubectl port-forward` to the web Service.** The console
-loads, but the CLI's space connect fails with
-`lookup api ... server misbehaving`. The web container's own proxy forwards
-`/api/` to the in-cluster `api:8080` without passing the original `Host`
-header on, so the api builds the space's WebSocket URL as `ws://api:8080`, a
-name that only resolves inside the cluster. A port-forward to `svc/api` is fine
-for the version check in `next_steps`, but it does not serve the console or
-`/connect/`. There is also no in-cluster ingress controller to port-forward to
-on GKE: the `gce`/`gce-internal` load balancer runs outside the cluster.
+**Charts older than 0.29: a port-forward to the web Service does not work for
+the CLI.** The console loads, but the CLI's space connect fails with
+`lookup api ... server misbehaving`: the web container's proxy did not pass the
+original `Host` header on, so the api built the space's WebSocket URL as
+`ws://api:8080`, a name that only resolves inside the cluster. Chart 0.29 passes
+it (and `X-Forwarded-Host` / `X-Forwarded-Proto`), which is why the quickest path
+above needs 0.29. There is no in-cluster ingress controller to port-forward to on
+GKE: the `gce`/`gce-internal` load balancer runs outside the cluster.
 
 ### Google-managed certificate: `ingress_mode = "gateway"` (chart ≥ 0.27.0)
 
@@ -324,9 +342,21 @@ Notes:
 Session/space workloads run across however many pools `spaces_pools` (a map,
 keyed by a short pool-name suffix) defines — one `google_container_node_pool`
 per entry, named `<cluster_name>-<key>-pool` and labeled `workload=<key>`.
-Default is a single `spaces` entry (`e2-standard-4`, 100GB, autoscaling
-1-5/zone) — an install that sets nothing here gets that one pool, same as
-before this was generalized. Add more entries for more pools, e.g. a bigger
+Default is a single `spaces` entry (`e2-standard-8`, 300GB, autoscaling
+1-5/zone; was `e2-standard-4`, 100GB). Disk is what fills first: the built-in
+compute classes request 20 GiB of disk per vCPU and GKE leaves about half of a
+boot disk allocatable (300GB gives about 146GiB, 100GB about 46GiB). Keep the
+1:4 vCPU:memory shape. At create the defaults need about 48 vCPU and 1050GB of
+regional `SSD_TOTAL_GB` (3 zones), so request both quotas first (capacity
+planning: https://docs.marshal.codes/sizing). **Upgrading an existing
+install:** a changed `machine_type` or `disk_size_gb` replaces the pool, and a
+replacement stops every running space on it. Pin your current values before you
+upgrade if you did not set them. To move to a different size, **add a new entry**
+to `spaces_pools` beside the old one (with quota for both), run
+`kubectl cordon -l cloud.google.com/gke-nodepool=<old>`, ask your users to stop and
+start their spaces, and remove the old entry only when no space pod is left on it.
+To collect logs for a support case, run
+`scripts/support-bundle.sh --since 6h --space <name>` (it asks whether to include the audit log; default no). Add more entries for more pools, e.g. a bigger
 machine for heavier sessions:
 
 ```hcl
@@ -354,8 +384,12 @@ you're scheduling something onto it some other way (a manual `nodeSelector`/
 toleration) — there's no chart-side wiring that tolerates a `spaces_pools`
 taint automatically (unlike control-plane's, below).
 
-`control_plane` stays a separate, dedicated pool — never share machine
-type/disk/sysctls with `spaces_pools`:
+`control_plane` is a separate pool — never share machine type/disk/sysctls with
+`spaces_pools` — and it is *dedicated* because `taint_control_plane_pool`
+defaults to `true`. With `false` neither pool is tainted, so control-plane
+pods can land on the spaces nodes and take their CPU. The default needs chart
+0.9.0 or newer (see
+[below](#node-pools-control-plane-vs-spaces_pools-isolated-by-default-taint-gated)).
 
 - **`control_plane`** (`control_plane_machine_type`/`control_plane_disk_size_gb`/
   `control_plane_min_node_count`/`control_plane_max_node_count`) — a separate
@@ -400,8 +434,7 @@ type/disk/sysctls with `spaces_pools`:
 
 Both pools exist unconditionally when `deploy_cluster = true`. Whether the
 split actually **isolates** anything depends on `taint_control_plane_pool`
-(bool, **default `false`**) — a deliberate safety gate. Flipping it to `true`
-does BOTH of the following in the same apply (see `main.tf`'s
+(bool, **default `true`**; was `false`). Setting it to `true` does BOTH of the following in the same apply (see `main.tf`'s
 `control_plane_node_selector`/`control_plane_tolerations` locals, derived from
 this one toggle — never set independently):
 - Taints the control-plane pool `NoSchedule` (`cluster.tf`).
@@ -415,9 +448,12 @@ running a version with `controlPlane.nodeSelector`/`tolerations` WIRING
 (chart **>= 0.9.0**) on the target cluster *before* you flip this — an older
 chart version silently ignores those values, so its control-plane pods would
 carry no toleration and become unschedulable the instant the taint lands (an
-outage). Bump `chart_version` to >= 0.9.0, confirm the cluster is healthy,
-*then* flip `taint_control_plane_pool = true`, in that order, on any
-already-running cluster.
+outage). `terraform plan` warns when `chart_version` is older. On a cluster
+still on a chart older than 0.9.0, bump `chart_version` first and confirm the
+cluster is healthy; or set `taint_control_plane_pool = false` until you have.
+On an install that never set it, the next apply adds the taint and the chart
+`nodeSelector` together and the helm upgrade moves the control-plane pods;
+pods already on a spaces node are not evicted by the taint itself.
 
 Space pods need no corresponding change: they carry no toleration, so once
 the control-plane pool is tainted they simply can't land there and settle on
@@ -443,7 +479,8 @@ plans no change.
   `containerfilesystem.googleapis.com` API, which the flavor never disables
   again. Needs GKE 1.30.1-gke.1329000 or later and the default `COS_CONTAINERD`
   node image. A custom `node_service_account` also needs
-  `roles/serviceusage.serviceUsageConsumer` on the project, and a VPC Service
+  `roles/serviceusage.serviceUsageConsumer` on the project (the dedicated node
+  SA gets it automatically), and a VPC Service
   Controls perimeter must include the API.
 - `max_parallel_image_pulls` (2 to 5) sets how many images a node pulls at
   once. Unset, GKE's own default applies (2 or 3). The kubelet pulls one pod's
@@ -477,6 +514,64 @@ but GKE can reclaim a node at any time and the spaces on it restart. Set it when
 the pool is first created: marking an existing pool `spot` replaces the pool.
 The control-plane pool never uses Spot.
 
+### Node service account (`create_node_service_account`, on by default)
+
+The nodes run as a dedicated service account, `<cluster_name>-nodes`, not the
+project's default Compute Engine SA. The default SA usually holds
+`roles/editor`, so a container that escaped to a node could take over the
+project. The dedicated SA can do only what a node needs:
+
+| Grant | Scope | Why |
+|---|---|---|
+| `roles/container.defaultNodeServiceAccount` | project | logs, metrics, node metadata |
+| `roles/artifactregistry.reader` | the registry cache repository only | image pulls (`create_registry_cache`) |
+| `roles/serviceusage.serviceUsageConsumer` | project | only with `image_streaming_enabled` |
+
+Pods never use the node SA: every pool runs `GKE_METADATA`, so pods get
+Workload Identity. No Marshal workload uses `hostNetwork` (which would bypass
+the GKE metadata server).
+
+Precedence: `node_service_account = "<email>"` wins and is used as it is (you
+grant its roles; the cache read is granted for you). Otherwise
+`create_node_service_account = true` (default) creates the dedicated SA. Set it
+to `false` for the old behavior (the Compute default SA).
+
+Per pool, `service_account` in a `spaces_pools` entry (and
+`control_plane_service_account` for the control-plane pool) overrides the
+module-wide choice: `null` (default) follows it, `"default"` means the Compute
+default SA, and any other value is an SA email you manage.
+
+#### Upgrading an existing install
+
+> **Pin your pools before you upgrade.** GKE cannot change a pool's service
+> account in place. Without pins, the first plan after this upgrade REPLACES
+> EVERY NODE POOL at once (all nodes deleted, every running space killed).
+> Check the plan: a `node_config[0].service_account` change marked
+> `forces replacement` means a pool is not pinned.
+
+Pools created before this setting existed run as the Compute default SA. Add
+`service_account = "default"` to every existing `spaces_pools` entry and set
+`control_plane_service_account = "default"`. The plan then creates only the SA
+and its grants, and changes no pool. (Or set
+`create_node_service_account = false` to change nothing at all.)
+
+Then move the pools one by one:
+
+1. Add a new `spaces_pools` entry without `service_account`, the same shape as
+   the pool it replaces. Set `workload` to the old pool's label value, so
+   anything that selects on `workload=<value>` places pods on both.
+   Example: key `spaces-sa` with `workload = "spaces"`.
+2. Apply. Check that the new nodes are `Ready`, pull images, and send logs.
+3. `kubectl cordon` the old pool's nodes. Spaces move to the new pool as they
+   restart (space pods are bare pods, so nothing moves them for you).
+4. When the old pool is empty, remove its entry and apply.
+5. The control-plane pool is a single resource, so moving it means a
+   replacement: drop `control_plane_service_account` in a short maintenance
+   window. The platform pods restart on the new node.
+
+Once no pool runs as the Compute default SA, the module also removes that SA's
+read grant on the registry cache.
+
 ## Provisioning a private cluster (`deploy_cluster = true`)
 
 Terraform creates, all in one apply, then installs onto it:
@@ -485,7 +580,8 @@ Terraform creates, all in one apply, then installs onto it:
 - **Locked-down control plane** — private endpoint by default
   (`enable_private_endpoint = true`) with **master authorized networks** (you must
   set `master_authorized_networks` to at least your admin/VPN CIDR, else you lock
-  yourself out). Set `enable_private_endpoint = false` for a public-but-authorized
+  yourself out; with `dns_endpoint_enabled = true` it may stay empty, see
+  [Skipping the bastion](#skipping-the-bastion-dns_endpoint_enabled--true)). Set `enable_private_endpoint = false` for a public-but-authorized
   endpoint if you administer from outside the VPC.
 - **Cloud Router + Cloud NAT** (`create_nat`, default on) — REQUIRED so private
   nodes can egress to pull images from `registry.marshal.codes` and reach the
@@ -497,13 +593,13 @@ Terraform creates, all in one apply, then installs onto it:
 - **Workload Identity** enabled (keyless GCP/AR auth) — pairs with
   `registry_auth_mode = "workloadIdentity"`.
 - **Node pool(s)** — `spaces_pools` (map, default a single `spaces` entry:
-  `e2-standard-4`, autoscaling 1-5/zone, 100GB), each entry's `machine_type` /
+  `e2-standard-8`, autoscaling 1-5/zone, 300GB), each entry's `machine_type` /
   autoscaling (`min_node_count`..`max_node_count`, or a fixed `node_count`) /
   `disk_size_gb` / `disk_type`; `release_channel` / `kubernetes_version` apply
   cluster-wide. `disk_size_gb` sizes for **ephemeral-storage**, not just
   capacity — session pods request 10-20GiB ephemeral-storage each, and GKE
-  reserves a large chunk of the boot disk for OS/image cache, so a 100GB disk
-  fits far fewer concurrent spaces than CPU/memory alone would suggest.
+  reserves about half of the boot disk for OS/image cache, so disk, not CPU or
+  memory, sets how many spaces fit on a node.
   Before committing to a pool's `machine_type` × `max_node_count` ×
   `disk_size_gb`, check the project's `CPUS_ALL_REGIONS` **and** regional
   `SSD_TOTAL_GB` quotas (summed across every entry in `spaces_pools` plus
@@ -555,15 +651,36 @@ terraform apply -target=google_compute_network.vpc \
                  -target=google_compute_router_nat.nat
 terraform apply -target=google_container_cluster.this \
                  -target='google_container_node_pool.spaces["spaces"]'
+#    The IAM bindings too, as a project owner, so the bastion never needs an
+#    IAM-admin role:
+terraform apply -target=google_project_iam_member.nodes_default_node_sa \
+                 -target=google_project_iam_member.nodes_service_usage \
+                 -target=google_service_account_iam_member.storage_workload_identity \
+                 -target=google_service_account_iam_member.storage_workload_identity_supervisor
 
 # 2. Put master_authorized_networks' CIDR = the subnet the bastion will live in
 #    (e.g. the default subnet_cidr, "10.10.0.0/20") — no need to know a real
 #    external CIDR at all.
 
-# 3. Bastion, no external IP, in that same subnet:
+# 3. Bastion, no external IP, in that same subnet, with its OWN service account.
+#    Never run it as the Compute default SA, and never add roles to that SA: it
+#    is shared by every VM in the project, and admin roles on it are a
+#    high-severity finding in cloud security scanners.
+gcloud iam service-accounts create marshal-bastion --project=<project>
+SA=marshal-bastion@<project>.iam.gserviceaccount.com
+for r in compute.networkAdmin container.admin storage.admin artifactregistry.admin \
+         secretmanager.admin certificatemanager.editor serviceusage.serviceUsageAdmin \
+         iam.securityReviewer iam.serviceAccountViewer logging.logWriter; do
+  gcloud projects add-iam-policy-binding <project> --member=serviceAccount:$SA \
+    --role=roles/$r --condition=None
+done
+# actAs on the node SA, so the bastion can update node pools:
+gcloud iam service-accounts add-iam-policy-binding <cluster>-nodes@<project>.iam.gserviceaccount.com \
+  --member=serviceAccount:$SA --role=roles/iam.serviceAccountUser
 gcloud compute instances create marshal-bastion \
   --zone=<region>-b --subnet=<subnet> --no-address \
-  --scopes=cloud-platform --image-family=debian-12 --image-project=debian-cloud
+  --service-account=$SA --scopes=cloud-platform \
+  --image-family=debian-12 --image-project=debian-cloud
 gcloud compute firewall-rules create allow-iap-ssh \
   --network=<network> --direction=INGRESS --action=ALLOW --rules=tcp:22 \
   --source-ranges=35.235.240.0/20
@@ -580,9 +697,23 @@ gcloud compute ssh marshal-bastion --zone=<region>-b --tunnel-through-iap
 #    now succeeds because the bastion's subnet is in master_authorized_networks.
 ```
 
-Delete the bastion once you're done (`deletion_protection` doesn't apply to it —
+The bastion SA can read IAM policies (`iam.securityReviewer`, so plans refresh)
+but not change them. A later change that adds an IAM binding (a new service
+account, a new Workload Identity binding) gets a 403 from the bastion: apply
+that one resource as a project owner from your own machine, or create the
+binding by hand and `terraform import` it.
+
+**Moving an existing bastion off the Compute default SA:** create the SA and
+grants above, then `gcloud compute instances stop marshal-bastion`,
+`gcloud compute instances set-service-account marshal-bastion
+--service-account=$SA --scopes=cloud-platform`, and `start`. Run `terraform
+plan` from the bastion (expect no resource changes), then remove every project
+role from `<number>-compute@developer.gserviceaccount.com`. The cluster does not
+use that SA when `create_node_service_account = true`.
+
+Delete the bastion once you're done (`deletion_protection` doesn't apply to it:
 it's not part of this Terraform config, just a manual `gcloud compute instances
-delete`).
+delete`). Delete its service account with it.
 
 ### Skipping the bastion: `dns_endpoint_enabled = true`
 
@@ -639,7 +770,7 @@ it.
 
 **Do not retype the chart values.** Terraform computes every GKE-derived value
 whether or not it installs, and these are the ones a human cannot reliably
-reproduce — a pull-through-cache endpoint, a storage service-account email, the
+reproduce — a pull-through-cache endpoint, the storage service-account emails, the
 scheduling that pairs with the pool taint:
 
 ```bash
@@ -719,7 +850,8 @@ mirroring `registry.marshal.codes` — a Secret Manager secret holds your pull
 token as the upstream credential, and the install self-wires onto the cache
 (`registry` + `registry_auth_mode = "workloadIdentity"` are set for you; you do
 **not** also set them by hand). Nodes pull credential-free via their own
-identity (Workload Identity / default compute SA) — no in-cluster pull secret.
+identity (the node service account, see "Node service account") — no
+in-cluster pull secret.
 The `helm` provider still uses the pull token directly for the chart pull
 itself (that step doesn't go through the node cache).
 
@@ -728,26 +860,6 @@ multiple installs, for instance — "one cache per organization, not per
 deployment"), set `create_registry_cache = false` and set `registry` /
 `registry_auth_mode` to point at your own — you're still required to run
 *some* pull-through cache, just not necessarily this repo's.
-
-### Bundled Postgres/Redis images: a Docker Hub cache too
-
-The bundled Postgres and Redis (any `*_mode = "bundled"`, Redis by default) are
-Bitnami images from Docker Hub (`bitnamilegacy/*`), not from
-`registry.marshal.codes`, so the cache above never sees them. Pulled directly,
-they share Docker Hub's anonymous per-IP rate limit with everything else behind
-your Cloud NAT address. So with the cache on, the flavor also creates a second
-Artifact Registry remote repository in front of Docker Hub
-(`dockerhub_cache_repository_id`, default `marshal-dockerhub-cache`; anonymous
-upstream, these are public images), grants the nodes read on it, and points the
-subcharts' `image.registry` at it. Same images and tags, pulled through your
-project.
-
-`cache_bundled_datastore_images = false` turns this off. On an install that
-predates it, the first apply with it on changes the bundled pods' image
-reference, so the Redis (and bundled Postgres) pod restarts once. Redis holds
-only reconstructible state; a bundled Postgres is down for that restart.
-A `values_overrides` entry that sets `postgresql.image` / `redis.image` still
-wins.
 
 ## Object storage (audit + spaces persistence)
 
@@ -764,15 +876,50 @@ create_spaces_persistence_bucket = true
 
 Each toggle is separate — enable one, both, or neither. Whichever you turn on
 creates its bucket (`<project>-<cluster>-audit-persistence` /
-`<project>-<cluster>-spaces-persistence`), and (the first time either is
-enabled) a shared GSA with `roles/storage.objectAdmin` on each enabled bucket,
-bound via **Workload Identity** (no downloaded key) to the KSA that actually
-does the I/O: the **api** for audit-persistence, and — for spaces-persistence —
-the **`<release>-supervisor`** KSA session pods run under, since it's the
-supervisor (inside each session pod), not the api, that reads/writes snapshots
-at runtime. `terraform output audit_persistence_bucket` /
-`spaces_persistence_bucket` prints the `gs://` URLs (`null` for whichever one
-you left off).
+`<project>-<cluster>-spaces-persistence`) and grants access through
+**Workload Identity** (no downloaded key). There are two GSAs:
+
+| GSA | Created when | Roles | Bound to KSA |
+|---|---|---|---|
+| `<cluster>-storage` | either bucket is on | `roles/storage.objectAdmin` on each enabled bucket | `<namespace>/<release>-api` |
+| `<cluster>-sup-storage` (cluster name cut to 18 chars) | spaces bucket is on | `roles/storage.objectAdmin` on the **spaces bucket only** | `<release>-spaces/<release>-supervisor` |
+
+The api uses both buckets. The supervisor (inside each session pod) reads and
+writes snapshots at runtime, so it needs its own identity. It gets a separate
+GSA because session pods run agent code: they must not reach the audit bucket.
+`terraform output audit_persistence_bucket` / `spaces_persistence_bucket`
+prints the `gs://` URLs (`null` for whichever one you left off), and
+`terraform output supervisor_storage_service_account` prints the supervisor
+GSA's email.
+
+**When the org blocks `setIamPolicy`.** The Workload Identity bindings call
+`setIamPolicy` on the GSA. If an org policy or missing rights make the apply
+fail with a 403 on `storage_workload_identity_supervisor`, an admin with rights
+on the service account applies the binding by hand:
+
+```bash
+gcloud iam service-accounts add-iam-policy-binding <supervisor_storage_service_account> \
+  --project <project> \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:<project>.svc.id.goog[<release>-spaces/<release>-supervisor]"
+```
+
+Then import it, so the next apply does not call `setIamPolicy` again:
+
+```bash
+terraform import 'google_service_account_iam_member.storage_workload_identity_supervisor[0]' \
+  "projects/<project>/serviceAccounts/<supervisor_storage_service_account> roles/iam.workloadIdentityUser serviceAccount:<project>.svc.id.goog[<release>-spaces/<release>-supervisor]"
+```
+ The same applies to the api binding
+(`storage_workload_identity`, member `...svc.id.goog[<namespace>/<release>-api]`
+on the `<cluster>-storage` GSA).
+
+**Upgrading an existing install.** The next apply creates the supervisor GSA
+and its spaces-bucket grant, and replaces the supervisor's Workload Identity
+binding (it moves from the shared storage GSA to the new one). The api's
+binding and the storage GSA's grants do not change. The supervisor KSA's
+`iam.gke.io/gcp-service-account` annotation changes to the new email. Stop
+and resume a space afterwards to prove it.
 
 Turn on both unless there is a reason not to: without the spaces bucket,
 spaces cannot be forked or archived and keep their files across stop/resume
@@ -806,10 +953,96 @@ on Workload Identity.
 > `force_destroy = false` makes a bucket with snapshots in it block
 > `terraform destroy` until you empty it.
 
+## After the install: owner, first space, storage
+
+Three one-time steps, in this order, take a finished apply to a working space. They
+take a few minutes.
+
+1. **Claim the owner account.** Read the setup token (Terraform never reads it, so
+   it is not in state), then open `/setup#token=<TOKEN>` on your app URL
+   (a `kubectl port-forward -n marshal svc/web 8080:80` on chart 0.29 or newer, or your ingress host):
+
+   ```bash
+   kubectl get secret marshal-app-secrets -n marshal -o jsonpath='{.data.SETUP_TOKEN}' | base64 -d
+   ```
+
+   Without a browser, make the same call the page makes. Read the password
+   without echoing it (it must not contain a `"` or a `\`); add `-k` while the
+   certificate is the placeholder:
+
+   ```bash
+   read -rs PW
+   curl -s -X POST http://localhost:8080/api/auth/setup -H 'Content-Type: application/json' \
+     -d "{\"token\":\"<TOKEN>\",\"email\":\"you@example.com\",\"password\":\"$PW\",\"org_name\":\"Your Org\"}"
+   ```
+
+   A `201` returns a session and the owner exists; the CLI then works with
+   `marshal login --server <url> --password` (plain `marshal login` opens a browser, which hangs on a machine without one). A second attempt returns `409`.
+2. **Connect the spaces bucket** (if you created one), before the first space.
+   The bucket is the storage; Marshal only uses it once an owner or admin connects it in *Settings > Space
+   Storage* and selecting *Save & enable* (provider GCS, the bucket name from `terraform output spaces_persistence_bucket` without the `gs://`, credential fields empty). Until then, and for any space created earlier, a space that is stopped on a compute
+   size without a persistent disk **loses its workspace**, and cannot be forked
+   or archived. Connect the audit bucket in *Settings > Auditing* the same way.
+3. **Publish a first stack.** A new install has no stacks or manifests, so *New
+   space* has nothing to offer and `marshal spaces new` stops with
+   `a manifest is required to create a space`. As the owner: Marketplace, install
+   a stack such as `default-engineering` and **publish** it (it installs
+   unpublished), then *New space* > *Create a manifest* from it. The page with
+   screenshots is [Publish your first stack](https://docs.marshal.codes/getting-started/owner).
+
+## If an apply is interrupted
+
+Expired credentials, a closed laptop or a timeout can stop an apply partway. The
+resources created so far are in state, so run `terraform plan` before you apply
+again and read it: a cluster or node pool whose create did not finish is
+**tainted**, and the next apply destroys and recreates it (several minutes, and
+anything on it). If the cluster is up and healthy, take it out of the plan with
+`terraform untaint google_container_cluster.this[0]` (the name is in the plan)
+and apply again. Refresh `GOOGLE_OAUTH_ACCESS_TOKEN` first if you use one.
+
 ## Day-2 upgrade
 
 Bump `chart_version` and `terraform apply`. Roll back with
 `helm rollback marshal -n marshal`.
+
+**Upgrading this flavor's code from a version without
+`create_node_service_account`:** pin every existing node pool to
+`service_account = "default"` (and `control_plane_service_account = "default"`)
+first, or the plan replaces all node pools at once. See "Node service account"
+above.
+
+**Upgrading this flavor's code from a version without the supervisor's own
+GSA:** the plan adds `<cluster>-sup-storage`, its bucket grant, and replaces
+`storage_workload_identity_supervisor`. The applier needs
+`iam.serviceAccounts.setIamPolicy` and `storage.buckets.setIamPolicy`. If it
+gets a 403, have a project owner add that one binding and `terraform import`
+it. If an org entered bucket credentials in **Settings > Space Storage**, clear
+them so sync uses Workload Identity, then delete the key. Prove it by stopping
+and resuming a space: the supervisor logs `persist: kopia repository ready`.
+
+### After an upgrade that carries security fixes
+
+The chart upgrades the platform. Packages, stacks and spaces are org data, and
+they move separately:
+
+1. **Before the apply, pause deputy schedules** and triggers that would
+   launch runs. Scheduled runs start as soon as the api is back, on the
+   versions they had before.
+2. **Upgrade the installed packages** (**Marketplace**, as an owner or admin).
+   Auto-update is off by default, so an install keeps the versions it has.
+3. **Move every stack and manifest to the new versions.** On each stack, run
+   **Check upgrades**: it publishes a new version and moves the manifests
+   on the previous one. Manifests on older stack versions are upgraded from
+   the manifest page. A version pinned in a manifest's patch (for example
+   `/modules/integration/docker`) is kept on upgrade, so bump the pin too.
+4. **Restart existing spaces.** A space keeps the package versions it was
+   created with, also across stop and resume. List running spaces with their
+   owners, and ask each owner to recreate theirs.
+5. **Check the result in a new space:** sidecar and tool images have the new
+   digests, and pull through `marshal-cache`.
+
+If you back up space rows or manifests while doing this, treat the backup as a
+secret (space manifests carry per-space keys) and delete it the same day.
 
 ## Tearing down (`terraform destroy`)
 
@@ -844,3 +1077,8 @@ terraform destroy
 
 Buckets created with `create_*_persistence_bucket` are not force-destroyed:
 empty them first, or the destroy stops on them.
+
+A destroy that finishes prints `Warning: Helm uninstall returned an information
+message ... [Secret] marshal-app-secrets kept due to the resource policy`. That
+is expected: the chart keeps its secrets object on uninstall, and the cluster is
+deleted a few steps later, so nothing is left behind.

@@ -1,0 +1,138 @@
+# Capabilities and default changes that reach an EXISTING install on upgrade.
+#
+# Read by the install-marshal skill when someone upgrades: for every entry newer
+# than the version they run, it tells them what is new, what the default is, what
+# the default does to THEIR install, and asks whether to enable, disable or keep
+# what they have, before the plan is applied (or after, when `when: after`).
+#
+# RULE for every change to this repo: a new variable, a new feature that is on or
+# off by default, or a changed default MUST add an entry here in the same PR.
+# `scripts/check-capabilities.sh` fails CI-style if an entry is malformed or names
+# a variable that does not exist.
+#
+# Fields
+#   id           short stable name
+#   since        installer tag that introduced it ("unreleased" until published;
+#                the publish step replaces it with the tag)
+#   flavors      aws-eks, gcp-gke, single-node-k3s
+#   variables    the tfvars key(s) involved
+#   kind         new-feature | default-changed
+#   default      the value an unset install now gets
+#   previous     what an install that never set it had before (default-changed only)
+#   when         before | after   (ask before the plan, or offer once it is applied)
+#   effect_on_existing   what the default does to an existing install, in plain words
+#   disruptive   true if applying the default stops spaces or replaces a resource
+#   question     the question to ask, plain language
+#   recommend    what to suggest, and why
+#   enable / disable     exactly what to write in terraform.tfvars
+#   needs        prerequisite (chart version, quota), or "" if none
+
+capabilities:
+  - id: taint-control-plane-pool
+    since: 0.32.0
+    flavors: [aws-eks, gcp-gke]
+    variables: [taint_control_plane_pool]
+    kind: default-changed
+    default: "true"
+    previous: "false"
+    when: before
+    disruptive: false
+    effect_on_existing: >-
+      Keeps the platform pods (api, gateway, web, marketplace) on their own node
+      pool so they cannot take CPU from spaces. The next apply adds the taint and
+      moves those pods; the platform restarts pod by pod. Running spaces are not touched.
+    question: >-
+      Marshal now keeps its own platform pods on a dedicated node pool by default,
+      so they stop competing with spaces for CPU. Turn this on for your install?
+    recommend: "Yes. Needs chart 0.9.0 or newer. Without it a few spaces fill the node."
+    enable: "taint_control_plane_pool = true"
+    disable: "taint_control_plane_pool = false"
+    needs: "chart_version 0.9.0 or newer"
+
+  - id: spaces-node-size-eks
+    since: 0.32.0
+    flavors: [aws-eks]
+    variables: [node_instance_types, node_disk_size_gb]
+    kind: default-changed
+    default: "m5.2xlarge, 200 GB"
+    previous: "m5.xlarge, 100 GB"
+    when: before
+    disruptive: true
+    effect_on_existing: >-
+      If you never set these, the next apply REPLACES the spaces node group and
+      stops every running space on it. Disk, not CPU, is what filled first on the
+      old size.
+    question: >-
+      The default spaces node is now larger (m5.2xlarge, 200 GB; was m5.xlarge,
+      100 GB) because disk filled first. Keep your current size, or move to the
+      new one? Moving replaces the node group, so it should be done by adding a
+      second group and moving spaces over, not in place.
+    recommend: >-
+      Keep your current size for this upgrade (pin it in terraform.tfvars), then
+      move with spaces_node_groups when the team can restart their spaces.
+    enable: "spaces_node_groups = { v2 = { instance_types = [\"m5.2xlarge\"], disk_size_gb = 200 } }  # then cordon the old group"
+    disable: "node_instance_types = [\"m5.xlarge\"]\nnode_disk_size_gb = 100"
+    needs: "vCPU quota covering old and new groups at once (72 recommended)"
+
+  - id: spaces-node-size-gke
+    since: 0.32.0
+    flavors: [gcp-gke]
+    variables: [spaces_pools]
+    kind: default-changed
+    default: "e2-standard-8, 300 GB"
+    previous: "e2-standard-4, 100 GB"
+    when: before
+    disruptive: true
+    effect_on_existing: >-
+      If you never set spaces_pools, the next apply replaces the spaces pool (a
+      rolling replacement) and stops the spaces on it. GKE leaves only about half
+      of a boot disk usable, so the old size held about 4 sessions per node.
+    question: >-
+      The default spaces pool is now e2-standard-8 with a 300 GB disk (was
+      e2-standard-4, 100 GB). Keep your current pool, or add a new pool at the new
+      size and move spaces over?
+    recommend: >-
+      Keep your current pool for this upgrade (pin it), then add a new spaces_pools
+      entry, cordon the old one, and let people restart their spaces.
+    enable: "spaces_pools = { spaces = { ...current... }, spaces-v2 = { machine_type = \"e2-standard-8\", disk_size_gb = 300 } }"
+    disable: "spaces_pools = { spaces = { machine_type = \"e2-standard-4\", disk_size_gb = 100 } }"
+    needs: "regional SSD_TOTAL_GB about 1050 and 48 vCPU for the default shape; quota for old and new pools together"
+
+  - id: eks-cluster-autoscaler
+    since: 0.32.0
+    flavors: [aws-eks]
+    variables: [enable_cluster_autoscaler]
+    kind: new-feature
+    default: "true"
+    previous: "none (the node group stayed at its desired size)"
+    when: before
+    disruptive: false
+    effect_on_existing: >-
+      Installs a Cluster Autoscaler so node groups grow when spaces are Pending and
+      shrink when nodes are empty. Adds tags to the node groups; nothing is
+      replaced. The autoscaler then owns the node count, so node_desired_size is
+      ignored after create. A node holding a running space is never removed.
+    question: >-
+      Marshal can now add and remove spaces nodes automatically on EKS (GKE already
+      does). Turn it on? Say no if you already run Karpenter or your own autoscaler.
+    recommend: "Yes, unless you run your own autoscaler. Make sure the vCPU quota covers your max node counts."
+    enable: "enable_cluster_autoscaler = true"
+    disable: "enable_cluster_autoscaler = false"
+    needs: "vCPU quota for the node groups' max sizes (72 recommended)"
+
+  - id: eks-extra-spaces-node-groups
+    since: 0.32.0
+    flavors: [aws-eks]
+    variables: [spaces_node_groups, create_default_spaces_node_group]
+    kind: new-feature
+    default: "none (off)"
+    when: after
+    disruptive: false
+    effect_on_existing: "Nothing changes until you add an entry. Lets you change node size without stopping spaces."
+    question: >-
+      You can now add extra spaces node groups on EKS, to change node size without
+      stopping spaces. Do you plan a size change soon?
+    recommend: "Only when you need a different size. Follow the add-a-pool steps in the install skill."
+    enable: "spaces_node_groups = { v2 = { instance_types = [\"m5.2xlarge\"], disk_size_gb = 200 } }"
+    disable: "spaces_node_groups = {}"
+    needs: "vCPU quota for old and new groups at once"

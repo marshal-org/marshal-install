@@ -228,19 +228,44 @@ variable "bastion_ami_id" {
 # ISOLATES anything.
 
 variable "node_instance_types" {
-  description = "EC2 instance type(s) for the SPACES node group. Default m5.xlarge (4 vCPU / 16 GB) — parity with gcp-gke's e2-standard-4 default."
+  description = <<-EOT
+    EC2 instance type(s) for the SPACES node group. Default m5.2xlarge (8 vCPU
+    / 32 GB), was m5.xlarge. On 4 vCPU the node's own system pods (kube-proxy,
+    aws-node, EBS CSI, node-tuner, metrics-server) leave room for only a
+    handful of sessions, and any control-plane pod that lands there (see
+    taint_control_plane_pool) takes most of the rest; a live install saturated
+    at one node with sessions Pending on "Insufficient cpu".
+
+    Keep the 1:4 vCPU:memory shape (m5/m6i). Session classes REQUEST 1 vCPU :
+    2 GiB, but agents burst past requests, so the extra memory is headroom, not
+    waste. Disk, not CPU or memory, is what usually fills first; see
+    node_disk_size_gb.
+
+    Changing this on a running install REPLACES the node group (instance_types
+    is immutable in place) and stops every space on it. Add a new group in
+    spaces_node_groups, cordon this one, and only change this once it is empty.
+  EOT
   type        = list(string)
-  default     = ["m5.xlarge"]
+  default     = ["m5.2xlarge"]
 }
 
 variable "node_disk_size_gb" {
-  description = "Spaces node group boot disk size (GB). Sized for session ephemeral-storage demand, same as gcp-gke's disk_size_gb."
+  description = <<-EOT
+    Spaces node group boot disk size (GB). Default 200, was 100. Sized for
+    session ephemeral-storage demand: the built-in compute classes request
+    20 GiB of disk per vCPU (Medium: 0.5 vCPU, 1 GiB, 10 GiB), and a space
+    often requests 16 GiB. About 89% of the boot disk is allocatable on EKS,
+    so 200 GB holds roughly 11 spaces at 16 GiB each; 100 GB held 5.
+
+    Changing this on a running install REPLACES the node group (disk_size is
+    immutable in place) and stops every space on it. See node_instance_types.
+  EOT
   type        = number
-  default     = 100
+  default     = 200
 }
 
 variable "node_desired_size" {
-  description = "Spaces node group desired node count."
+  description = "Spaces node group desired node count at CREATE. With enable_cluster_autoscaler (default) the autoscaler owns the count afterwards and later changes here are ignored."
   type        = number
   default     = 1
 }
@@ -255,6 +280,82 @@ variable "node_max_size" {
   description = "Spaces node group autoscaling ceiling."
   type        = number
   default     = 5
+}
+
+variable "enable_cluster_autoscaler" {
+  description = <<-EOT
+    Install the Kubernetes Cluster Autoscaler so the node groups grow when
+    spaces are Pending and shrink when nodes are empty (what GKE node pools do
+    natively). Default true. It scales each group between its min and max size;
+    the vCPU quota is the real ceiling (see the README quota table). A node that
+    holds a running space is never removed: spaces are bare pods with emptyDir
+    volumes, which the autoscaler will not evict.
+
+    Set false if you run Karpenter or your own autoscaler. Because the
+    autoscaler owns the node count, node_desired_size only applies when a group
+    is created; later changes to it are ignored. With the autoscaler off, change
+    a running group's size with `aws eks update-nodegroup-config`.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "cluster_autoscaler_chart_version" {
+  description = "Version of the kubernetes/autoscaler `cluster-autoscaler` Helm chart. Default 9.59.0 (autoscaler 1.35.0; the nearest release at or below the default kubernetes_version). Keep the autoscaler's minor within one of kubernetes_version."
+  type        = string
+  default     = "9.59.0"
+}
+
+variable "cluster_autoscaler_scale_down_unneeded_time" {
+  description = "How long a node must be empty before the autoscaler removes it. Default 10m."
+  type        = string
+  default     = "10m"
+}
+
+variable "create_default_spaces_node_group" {
+  description = <<-EOT
+    Create the default spaces node group (the one sized by node_instance_types,
+    node_disk_size_gb and node_*_size). Default true. Set it to false only
+    after every space has moved to a group in spaces_node_groups: Terraform
+    then destroys the default group, so check it holds no space pods first
+    (kubectl get pods -n marshal-spaces -o wide). See spaces_node_groups.
+  EOT
+  type        = bool
+  default     = true
+}
+
+variable "spaces_node_groups" {
+  description = <<-EOT
+    Extra SPACES node groups, keyed by a short name (the group is named
+    "<cluster_name>-spaces-<key>" and labeled workload=spaces, so spaces
+    schedule onto it like any other spaces group). Default {} (none).
+
+    Use this to change node size or disk WITHOUT replacing a live group:
+    instance_types and disk_size are immutable on an EKS node group, so editing
+    node_instance_types or node_disk_size_gb replaces the group and stops every
+    space on it. Instead:
+      1. Add an entry here (check the vCPU quota covers old + new at once).
+         terraform plan must show only additions.
+      2. Cordon the old group, do not drain it:
+         kubectl cordon -l eks.amazonaws.com/nodegroup=<cluster_name>-spaces
+      3. Ask the team to stop and start their spaces over the next few hours;
+         they come back on the new group.
+      4. When no space pods are left on the old nodes, set
+         create_default_spaces_node_group = false (or delete the old entry) and
+         apply. Only the empty group is destroyed.
+    Roll back before step 4 with kubectl uncordon.
+
+    Each entry: instance_types (default ["m5.2xlarge"]), disk_size_gb (default
+    200), desired_size / min_size / max_size (defaults 1 / 1 / 5).
+  EOT
+  type = map(object({
+    instance_types = optional(list(string), ["m5.2xlarge"])
+    disk_size_gb   = optional(number, 200)
+    desired_size   = optional(number, 1)
+    min_size       = optional(number, 1)
+    max_size       = optional(number, 5)
+  }))
+  default = {}
 }
 
 variable "control_plane_instance_types" {
@@ -315,18 +416,26 @@ variable "taint_control_plane_pool" {
     control-plane) AND set the module's control_plane_node_selector/
     tolerations to match (main.tf) — both derive from this ONE toggle so the
     taint and the matching chart toleration always land in the SAME apply.
-    DEFAULT FALSE.
+    DEFAULT TRUE (was false).
 
-    Still requires the Marshal chart to already be running a
-    version with controlPlane.nodeSelector/tolerations wiring (>= 0.9.0)
-    BEFORE this is ever set true — an older chart version ignores those
-    values entirely, so its control-plane pods would carry no toleration and
-    become unschedulable the moment the taint lands (an outage). Confirm the
-    chart version first, then flip this. Same chart-version-ordering gotcha
-    already documented on gcp-gke's identical toggle.
+    Why true: with false, api/gateway/web/marketplace pods (about 4.4 vCPU of
+    requests at the chart baseline) can land on the spaces nodes and take the
+    CPU the sessions need. A new install's spaces node showed 2.75 of 3.92
+    vCPU requested with zero sessions; an earlier install also had to set
+    this to true after control-plane pods landed on its spaces group.
+
+    Requires a chart that has controlPlane.nodeSelector/tolerations wiring
+    (>= 0.9.0); a check in main.tf warns when chart_version is older, because
+    an older chart ignores those values and its control-plane pods become
+    unschedulable the moment the taint lands (an outage).
+
+    On an existing install the next apply adds the taint and the chart
+    nodeSelector together; the helm upgrade rolls the control-plane pods onto
+    the control-plane group. Pods already running on a spaces node are not
+    evicted by the taint itself. Set false to keep the old behaviour.
   EOT
   type        = bool
-  default     = false
+  default     = true
 }
 
 

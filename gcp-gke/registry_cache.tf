@@ -101,15 +101,33 @@ resource "google_artifact_registry_repository" "cache" {
   depends_on = [google_secret_manager_secret_iam_member.ar_service_agent, google_project_service.required]
 }
 
-# Nodes pull through the cache via their own identity (Workload Identity /
-# default compute SA) — no in-cluster pull secret needed.
+# Nodes pull through the cache via their own identity (the node SA, through
+# the kubelet) — no in-cluster pull secret needed.
+#
+# This grant is for node_service_account or the Compute default SA. It stays
+# while either is in use, and goes away once every pool has moved to the
+# dedicated SA (node_reader_dedicated below). Same address as before the
+# dedicated SA existed, so an upgrade plans no change to it.
 resource "google_artifact_registry_repository_iam_member" "node_reader" {
-  count      = var.create_registry_cache ? 1 : 0
+  count      = var.create_registry_cache && (var.node_service_account != "" || local.compute_default_sa_in_use || !local.provision) ? 1 : 0
   project    = var.project_id
   location   = google_artifact_registry_repository.cache[0].location
   repository = google_artifact_registry_repository.cache[0].name
   role       = "roles/artifactregistry.reader"
   member     = var.node_service_account != "" ? "serviceAccount:${var.node_service_account}" : "serviceAccount:${data.google_project.this[0].number}-compute@developer.gserviceaccount.com"
+}
+
+# Read on this one repository only, for the dedicated node SA
+# (node_service_account.tf). It is the only Artifact Registry repository the
+# nodes pull from: the bundled datastores and GKE's own images come from
+# public registries.
+resource "google_artifact_registry_repository_iam_member" "node_reader_dedicated" {
+  count      = var.create_registry_cache && local.create_node_sa ? 1 : 0
+  project    = var.project_id
+  location   = google_artifact_registry_repository.cache[0].location
+  repository = google_artifact_registry_repository.cache[0].name
+  role       = "roles/artifactregistry.reader"
+  member     = "serviceAccount:${google_service_account.nodes[0].email}"
 }
 
 locals {
@@ -118,77 +136,4 @@ locals {
   # we created, so there's no ambiguity the way there could be for a customer's
   # own arbitrary BYO mirror (see var.tools_registry).
   registry_cache_tools_endpoint = var.create_registry_cache ? "${local.region}-docker.pkg.dev/${var.project_id}/${var.registry_cache_repository_id}/marshal-tools" : null
-}
-
-# ── Docker Hub cache for the bundled datastores ──────────────────────────────
-# The chart's bundled Postgres and Redis are Bitnami subcharts whose images
-# come from Docker Hub (docker.io/bitnamilegacy/*), not from
-# registry.marshal.codes, so the cache above never sees them. Every node that
-# starts one pulls anonymously from Docker Hub and shares its per-IP rate limit
-# with everything else behind the same Cloud NAT address.
-#
-# A second remote repository, this one in front of Docker Hub, fixes that the
-# same way: the bundled images pull through your project, and the subcharts'
-# image.registry is pointed at it (main.tf). Anonymous upstream: these are
-# public images, so there is no credential to store.
-#
-# Only when the cache is on AND something is bundled. An install with external
-# Postgres and external Redis gets nothing new.
-
-variable "cache_bundled_datastore_images" {
-  description = "When create_registry_cache = true and Postgres or Redis is bundled, also create an Artifact Registry remote repository in front of Docker Hub and pull the bundled Bitnami Postgres/Redis images through it instead of from docker.io. true (default). On an existing install, turning this on (it is the default) restarts the bundled Redis/Postgres pods once, because their image reference changes; the image itself is the same."
-  type        = bool
-  default     = true
-  nullable    = false
-}
-
-variable "dockerhub_cache_repository_id" {
-  description = "Name of the Artifact Registry repository that caches Docker Hub for the bundled datastores."
-  type        = string
-  default     = "marshal-dockerhub-cache"
-}
-
-locals {
-  bundled_datastores = var.database_mode == "bundled" || var.redis_mode == "bundled"
-  cache_dockerhub    = var.create_registry_cache && var.cache_bundled_datastore_images && local.bundled_datastores
-
-  # image.registry for the Bitnami subcharts: "<registry>/<repository>:<tag>",
-  # so the repository (bitnamilegacy/redis) keeps mapping to the same Docker
-  # Hub path through the cache.
-  dockerhub_cache_endpoint = local.cache_dockerhub ? "${local.region}-docker.pkg.dev/${var.project_id}/${var.dockerhub_cache_repository_id}" : null
-
-  # Chart values that point each bundled subchart at the cache. Only the
-  # engines that are bundled get a key: a postgresql block on an install with
-  # external Postgres is harmless, but it is noise in every rendered diff.
-  bundled_image_values = local.cache_dockerhub ? merge(
-    var.database_mode == "bundled" ? { postgresql = { image = { registry = local.dockerhub_cache_endpoint } } } : {},
-    var.redis_mode == "bundled" ? { redis = { image = { registry = local.dockerhub_cache_endpoint } } } : {},
-  ) : {}
-}
-
-resource "google_artifact_registry_repository" "dockerhub_cache" {
-  count         = local.cache_dockerhub ? 1 : 0
-  project       = var.project_id
-  location      = local.region
-  repository_id = var.dockerhub_cache_repository_id
-  format        = "DOCKER"
-  mode          = "REMOTE_REPOSITORY"
-
-  remote_repository_config {
-    description = "Pull-through cache of Docker Hub for the bundled Postgres/Redis images"
-    docker_repository {
-      public_repository = "DOCKER_HUB"
-    }
-  }
-
-  depends_on = [google_project_service.required]
-}
-
-resource "google_artifact_registry_repository_iam_member" "dockerhub_node_reader" {
-  count      = local.cache_dockerhub ? 1 : 0
-  project    = var.project_id
-  location   = google_artifact_registry_repository.dockerhub_cache[0].location
-  repository = google_artifact_registry_repository.dockerhub_cache[0].name
-  role       = "roles/artifactregistry.reader"
-  member     = var.node_service_account != "" ? "serviceAccount:${var.node_service_account}" : "serviceAccount:${data.google_project.this[0].number}-compute@developer.gserviceaccount.com"
 }

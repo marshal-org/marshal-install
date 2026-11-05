@@ -42,7 +42,7 @@ output "next_steps" {
            terraform output -raw argocd_derived_values > values-derived.yaml
          These are the values this module would have passed to helm and which no
          human can reliably reproduce: the registry endpoints, the storage GSA
-         email on BOTH the api and the supervisor service accounts, and the
+         emails on the api and the supervisor service accounts, and the
          control-plane scheduling that pairs with the node taint.
 
       2. Seed the Secrets BEFORE the first sync — an empty marshal-license at
@@ -127,22 +127,13 @@ output "argocd_derived_values" {
         tolerations  = local.control_plane_tolerations
       }
     } : {},
-    # One redis key for both reasons it can appear: merge() is shallow, so two
-    # separate redis blocks would silently drop one of them.
-    var.redis_mode == "bundled" && (var.taint_control_plane_pool || local.cache_dockerhub) ? {
-      redis = merge(
-        var.taint_control_plane_pool ? {
-          master = {
-            nodeSelector = local.control_plane_node_selector
-            tolerations  = local.control_plane_tolerations
-          }
-        } : {},
-        local.cache_dockerhub ? { image = { registry = local.dockerhub_cache_endpoint } } : {},
-      )
-    } : {},
-    # The bundled images through the Docker Hub cache (registry_cache.tf).
-    var.database_mode == "bundled" && local.cache_dockerhub ? {
-      postgresql = { image = { registry = local.dockerhub_cache_endpoint } }
+    var.redis_mode == "bundled" && var.taint_control_plane_pool ? {
+      redis = {
+        master = {
+          nodeSelector = local.control_plane_node_selector
+          tolerations  = local.control_plane_tolerations
+        }
+      }
     } : {},
   ))
 }

@@ -26,9 +26,27 @@ eval "$(aws configure export-credentials --format env)"
 export AWS_REGION=<your region>
 ```
 
-Those credentials last about an hour at most; for a 20-minute apply that is
-enough, for a longer session point a profile at `credential_process =
-aws configure export-credentials --profile <name> --format process`.
+**These credentials can expire in about 15 minutes**, whatever the session's
+nominal length, and a full install plus its first apply can take longer than
+that. When they expire in the middle of an apply it stops with
+`ExpiredTokenException`, with the cluster half built (see
+[If an apply is interrupted](#if-an-apply-is-interrupted)). Prefer a profile that
+refreshes on demand, in `~/.aws/config`:
+
+```ini
+[profile marshal-install]
+credential_process = aws configure export-credentials --profile <your-login-profile> --format process
+region = <your region>
+```
+
+```bash
+export AWS_PROFILE=marshal-install AWS_REGION=<your region>
+```
+
+Keep `AWS_PROFILE` exported for every command after that, `kubectl` and `helm`
+too: the kubeconfig that `aws eks update-kubeconfig` writes calls
+`aws eks get-token`, which reads the same variable, and without it kubectl
+stops authenticating when the exported snapshot does.
 
 ## Prerequisites the REUSE path does NOT set up for you
 
@@ -122,12 +140,42 @@ for you automatically:
   install on it: it has git and NAT egress, so it clones this installer itself
   and nothing is shipped between machines.
 - **Two node groups** — `spaces` (session/space workloads, default
-  `m5.xlarge`) and `control_plane` (api/gateway/web/marketplace/redis only,
+  `m5.2xlarge`, 200 GB disk) and `control_plane` (api/gateway/web/marketplace/redis only,
   default `m5.2xlarge` — **not smaller**: the chart's own baseline already
   needs ~4.4 vCPU of requests before any HPA scale-out, a lesson learned the
   hard way on the GCP side with an undersized default). `taint_control_plane_pool`
-  (default `false`) taints the control-plane group AND sets the matching chart
-  toleration atomically, same toggle shape as `gcp-gke`.
+  (default `true`) taints the control-plane group AND sets the matching chart
+  toleration atomically, same toggle shape as `gcp-gke`. It needs chart
+  **0.9.0 or newer**; `terraform plan` warns when `chart_version` is older.
+  Without the taint, control-plane pods (about 4.4 vCPU of requests) can land
+  on the spaces nodes and leave room for only a couple of sessions.
+  **Upgrading an existing install:** the next apply adds the taint and the chart
+  `nodeSelector` together, and the helm upgrade moves the control-plane pods.
+  The new `spaces` defaults (`m5.2xlarge`, 200 GB; were `m5.xlarge`, 100 GB)
+  **replace the node group** on an install that never set them, because
+  `instance_types` and `disk_size` cannot change in place, and a replacement stops
+  every running space on it. Pin your current values in `terraform.tfvars` before
+  you upgrade. To move to a different size without that, add a second node
+  group in `spaces_node_groups` beside the old one, cordon the old nodes
+  (`kubectl cordon -l eks.amazonaws.com/nodegroup=<cluster_name>-spaces`), ask your
+  users to stop and start their spaces, and once the old nodes hold no space pods
+  set `create_default_spaces_node_group = false`. Both groups run at once, so the
+  vCPU quota must cover both. For capacity planning see
+  https://docs.marshal.codes/sizing. To collect logs for a support case, run
+  `scripts/support-bundle.sh --since 6h --space <name>` (it asks whether to include the audit log; default no).
+- **Cluster Autoscaler** (`enable_cluster_autoscaler`, default `true`) —
+  Helm release in `kube-system` with its own IRSA role, so the node groups grow
+  when spaces are Pending and shrink when nodes are empty (GKE node pools do this
+  natively). It scales each group between its `*_min_size` and `*_max_size`; the
+  vCPU quota is the real ceiling. A node holding a running space is never
+  removed: spaces are bare pods with emptyDir volumes, which it will not evict.
+  The autoscaler owns the node count after create, so `node_desired_size` only
+  applies when a group is created (Terraform ignores later changes). Set it
+  `false` if you run Karpenter or your own autoscaler, and then change a running
+  group's size with `aws eks update-nodegroup-config`. **Upgrading an existing
+  install:** the next apply adds the autoscaler and tags the node groups; no group
+  is replaced. Node groups scale one node at a time, so the first new space can
+  wait a few minutes for a node to join.
 - **metrics-server** (EKS-managed addon, like EBS CSI) — no IRSA role needed,
   it only talks to the in-cluster kubelet API. Backs `kubectl top` and any
   CPU/memory-based HPA.
@@ -179,9 +227,25 @@ live install. Three real-certificate paths, mutually exclusive, both postures:
   is no orphan self-signed cert sitting in ACM.
 - The third path is two applies on purpose: an ALB listener rejects a cert in
   `PENDING_VALIDATION`, so the first apply comes up on HTTP:80 and prints
-  `acm_validation_records`; once `acm_certificate_status` reads `ISSUED`, the
-  next apply attaches it and adds the HTTPS listener plus the `ssl-redirect`.
-  `local.alb_certificate_arn` (alb_tls.tf) is the single place that decides.
+  `acm_validation_records`; once `acm_certificate_status_line` reads `ISSUED`,
+  the next apply attaches it and adds the HTTPS listener plus the `ssl-redirect`.
+  `local.alb_certificate_arn` (alb_tls.tf) is the single place that decides, and
+  the `ssl-redirect` annotation is set only when it is non-empty, so no apply
+  ever redirects to a listener that does not exist.
+- `acm_validation_records` lists each distinct record once. A wildcard
+  (`*.preview.example.com`) and its parent share one CNAME, so you add one
+  record for both.
+- **Cloudflare:** add the validation CNAMEs as **DNS-only** (grey cloud).
+  Cloudflare does not allow proxying a CNAME that points at
+  `acm-validations.aws` (API error 9003, "not allowed for a proxied record"),
+  so if the dashboard will not save the record, switch the cloud to grey.
+  Leave the app's own record on whatever setting you want.
+- ACM stops waiting after 72 hours. If the records were not in place by then,
+  the certificate goes to `VALIDATION_TIMED_OUT` (or `FAILED`, for example on a
+  CAA record that does not allow Amazon) and is never retried.
+  `acm_certificate_status_line` says so; request a new one with
+  `terraform apply -replace='aws_acm_certificate.requested[0]'` and add the new
+  records.
 - A **public** ACM cert is fine on an internal ALB: DNS validation needs no
   inbound reachability. An internal-only zone needs ACM Private CA or your own
   PEM via `tls_mode="inline"`.
@@ -253,22 +317,23 @@ enabled (`harbor.tf`):
 
 ## Quickstart
 
-**Before you start: an on-demand vCPU quota of at least 40** in the region
+**Before you start: an on-demand vCPU quota of at least 72** in the region
 (EC2 quota `L-1216C47A`, "Running On-Demand Standard (A, C, D, H, I, M, R, T,
 Z) instances"). A new account can start as low as 5, which cannot create the
-cluster at all. Where 40 comes from, with the default node sizes and limits:
+cluster at all. Where 72 comes from, with the default node sizes and limits:
 
 | | vCPU |
 |---|---|
-| At create: 1 × `m5.xlarge` spaces node + 1 × `m5.2xlarge` control-plane node | 12 |
+| At create: 1 × `m5.2xlarge` spaces node + 1 × `m5.2xlarge` control-plane node | 16 |
 | Optional bastion (`t3.micro`) | +2 |
-| Fully scaled: 5 spaces nodes (`node_max_size`) + 2 control-plane nodes (`control_plane_max_size`) + bastion | 38 |
+| Fully scaled: 5 spaces nodes (`node_max_size`) + 2 control-plane nodes (`control_plane_max_size`) + bastion | 58 |
+| One replacement node while a node group updates | +8 |
 
-Ask for 40. With less, the install still comes up (12 is the floor), but the
-autoscaler stops adding space nodes when it hits the quota, so the limit on
-concurrent spaces is the quota, not `node_max_size`. A node group update also
-launches replacement nodes before it drains the old ones, which needs headroom
-above the steady state. Raising the quota is a support request that can take
+Ask for 72. With less, the install still comes up (16 is the floor), but the
+autoscaler cannot add nodes past the quota, so the limit on concurrent spaces is
+the quota, not `node_max_size`. A node group update also launches replacement
+nodes before it drains the old ones, which needs headroom above the steady state.
+Raising the quota is a support request that can take
 days; `scripts/preflight-aws.sh` prints your current value and checks it
 against these numbers. Changed the instance types or the max sizes? Redo the
 sum with yours.
@@ -400,6 +465,55 @@ Order: delete your spaces in Marshal (so no pods hold volumes), `terraform apply
 with the settings above, then `terraform destroy`. Afterwards,
 `aws eks list-clusters`, `aws rds describe-db-instances` and
 `aws s3api list-buckets` in your region should show nothing of yours.
+
+## After the install: owner, first space, storage
+
+Three one-time steps, in this order, take a finished apply to a working space. They
+take a few minutes.
+
+1. **Claim the owner account.** Read the setup token (Terraform never reads it, so
+   it is not in state), then open `/setup#token=<TOKEN>` on your app URL
+   (`kubectl port-forward -n marshal svc/web 8080:80`, then `http://localhost:8080`):
+
+   ```bash
+   kubectl get secret marshal-app-secrets -n marshal -o jsonpath='{.data.SETUP_TOKEN}' | base64 -d
+   ```
+
+   Without a browser, make the same call the page makes. Read the password
+   without echoing it (it must not contain a `"` or a `\`); add `-k` while the
+   certificate is the placeholder:
+
+   ```bash
+   read -rs PW
+   curl -s -X POST http://localhost:8080/api/auth/setup -H 'Content-Type: application/json' \
+     -d "{\"token\":\"<TOKEN>\",\"email\":\"you@example.com\",\"password\":\"$PW\",\"org_name\":\"Your Org\"}"
+   ```
+
+   A `201` returns a session and the owner exists; the CLI then works with
+   `marshal login --server <url> --password` (plain `marshal login` opens a browser, which hangs on a machine without one). A second attempt returns `409`.
+2. **Connect the spaces bucket** (if you created one), before the first space.
+   The bucket is the storage; Marshal only uses it once an owner or admin connects it in *Settings > Space
+   Storage* and selecting *Save & enable* (provider S3, the bucket name from `terraform output spaces_persistence_bucket` without the `s3://`, credential fields empty). Until then, and for any space created earlier, a space that is stopped on a compute
+   size without a persistent disk **loses its workspace**, and cannot be forked
+   or archived. Connect the audit bucket in *Settings > Auditing* the same way.
+3. **Publish a first stack.** A new install has no stacks or manifests, so *New
+   space* has nothing to offer and `marshal spaces new` stops with
+   `a manifest is required to create a space`. As the owner: Marketplace, install
+   a stack such as `default-engineering` and **publish** it (it installs
+   unpublished), then *New space* > *Create a manifest* from it. The page with
+   screenshots is [Publish your first stack](https://docs.marshal.codes/getting-started/owner).
+
+## If an apply is interrupted
+
+Expired credentials, a closed laptop or a timeout can stop an apply partway. The
+resources created so far are in state, so run `terraform plan` before you apply
+again and read it: an EKS cluster whose create did not finish waiting is
+**tainted**, and the next apply destroys and recreates it (about 8 minutes for the
+cluster, plus everything on it). If the cluster shows `ACTIVE`
+(`aws eks describe-cluster --name <cluster_name> --query cluster.status`), take it
+out of the plan with `terraform untaint 'aws_eks_cluster.this[0]'` and apply
+again. Use a self-refreshing credentials profile (above) so it does not happen
+twice.
 
 ## Design references
 

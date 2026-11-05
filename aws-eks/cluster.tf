@@ -293,6 +293,16 @@ resource "aws_iam_role_policy_attachment" "node_ecr" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+locals {
+  # Tags the Cluster Autoscaler's auto-discovery looks for. EKS managed node
+  # groups propagate their tags to the underlying Auto Scaling group. Always set
+  # (harmless when the autoscaler is off) so enabling it later changes no group.
+  autoscaler_tags = {
+    "k8s.io/cluster-autoscaler/enabled"             = "true"
+    "k8s.io/cluster-autoscaler/${var.cluster_name}" = "owned"
+  }
+}
+
 # ── Node groups ───────────────────────────────────────────────────────────────
 # TWO groups (see variables.tf for why they're never sized the same): "spaces"
 # runs session/space workloads; "control_plane" is a separate, smaller group
@@ -301,7 +311,7 @@ resource "aws_iam_role_policy_attachment" "node_ecr" {
 # the split actually ISOLATES anything (main.tf derives the matching chart
 # toleration from the same toggle).
 resource "aws_eks_node_group" "spaces" {
-  count           = local.provision ? 1 : 0
+  count           = local.provision && var.create_default_spaces_node_group ? 1 : 0
   cluster_name    = aws_eks_cluster.this[0].name
   node_group_name = "${var.cluster_name}-spaces"
   node_role_arn   = aws_iam_role.node[0].arn
@@ -309,6 +319,7 @@ resource "aws_eks_node_group" "spaces" {
   instance_types  = var.node_instance_types
   disk_size       = var.node_disk_size_gb
   labels          = { workload = "spaces" }
+  tags            = local.autoscaler_tags
 
   scaling_config {
     desired_size = var.node_desired_size
@@ -349,6 +360,63 @@ resource "aws_eks_node_group" "spaces" {
     aws_iam_role_policy_attachment.node_ecr,
     aws_route_table_association.private,
   ]
+
+  # The autoscaler owns the node count after create; without this the next
+  # apply would reset it to the desired size in the tfvars.
+  lifecycle {
+    ignore_changes = [scaling_config[0].desired_size]
+  }
+}
+
+# Additional SPACES node groups (spaces_node_groups). Same shape as the default
+# group above, one per map entry, named "<cluster_name>-spaces-<key>" and
+# labeled workload=spaces so the scheduler treats them as the same kind of
+# capacity. This is how a node size or disk change is made WITHOUT replacing a
+# live group: add an entry, cordon the old group, let users stop/start their
+# spaces, then remove the old group (see variables.tf).
+resource "aws_eks_node_group" "spaces_extra" {
+  for_each        = local.provision ? var.spaces_node_groups : {}
+  cluster_name    = aws_eks_cluster.this[0].name
+  node_group_name = "${var.cluster_name}-spaces-${each.key}"
+  node_role_arn   = aws_iam_role.node[0].arn
+  subnet_ids      = local.node_subnet_ids
+  instance_types  = each.value.instance_types
+  disk_size       = each.value.disk_size_gb
+  labels          = { workload = "spaces" }
+  tags            = local.autoscaler_tags
+
+  scaling_config {
+    desired_size = each.value.desired_size
+    min_size     = each.value.min_size
+    max_size     = each.value.max_size
+  }
+
+  update_config {
+    max_unavailable = var.node_group_update_max_unavailable
+  }
+
+  dynamic "launch_template" {
+    for_each = var.create_harbor_cache ? [1] : []
+    content {
+      id      = aws_launch_template.harbor_containerd_config[0].id
+      version = aws_launch_template.harbor_containerd_config[0].latest_version
+    }
+  }
+
+  # Same ordering reason as the default group: nodes must not boot before the
+  # private route table associations exist.
+  depends_on = [
+    aws_iam_role_policy_attachment.node_worker,
+    aws_iam_role_policy_attachment.node_cni,
+    aws_iam_role_policy_attachment.node_ecr,
+    aws_route_table_association.private,
+  ]
+
+  # The autoscaler owns the node count after create; without this the next
+  # apply would reset it to the desired size in the tfvars.
+  lifecycle {
+    ignore_changes = [scaling_config[0].desired_size]
+  }
 }
 
 resource "aws_eks_node_group" "control_plane" {
@@ -360,6 +428,7 @@ resource "aws_eks_node_group" "control_plane" {
   instance_types  = var.control_plane_instance_types
   disk_size       = var.control_plane_disk_size_gb
   labels          = { workload = "control-plane" }
+  tags            = local.autoscaler_tags
 
   scaling_config {
     desired_size = var.control_plane_desired_size
@@ -410,4 +479,10 @@ resource "aws_eks_node_group" "control_plane" {
     aws_iam_role_policy_attachment.node_ecr,
     aws_route_table_association.private,
   ]
+
+  # The autoscaler owns the node count after create; without this the next
+  # apply would reset it to the desired size in the tfvars.
+  lifecycle {
+    ignore_changes = [scaling_config[0].desired_size]
+  }
 }

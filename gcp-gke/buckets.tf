@@ -53,6 +53,21 @@ resource "google_service_account" "storage" {
   depends_on = [google_project_service.required]
 }
 
+# The supervisor gets its OWN GSA, with access to the spaces bucket only. Session
+# pods run agent code, so the identity they carry must not reach the audit
+# bucket (the shared storage GSA above has objectAdmin on both).
+#
+# account_id is 6-30 chars. The "-sup-storage" suffix is 12, so the cluster name
+# is cut to 18 chars (and a trailing "-" from the cut dropped).
+resource "google_service_account" "supervisor_storage" {
+  count        = var.create_spaces_persistence_bucket ? 1 : 0
+  project      = var.project_id
+  account_id   = "${trimsuffix(substr(var.cluster_name, 0, 18), "-")}-sup-storage"
+  display_name = "Marshal (${var.cluster_name}) supervisor spaces persistence bucket access"
+
+  depends_on = [google_project_service.required]
+}
+
 resource "google_storage_bucket" "audit_persistence" {
   count                       = var.create_audit_persistence_bucket ? 1 : 0
   project                     = var.project_id
@@ -93,6 +108,13 @@ resource "google_storage_bucket_iam_member" "spaces_persistence_object_admin" {
   member = "serviceAccount:${google_service_account.storage[0].email}"
 }
 
+resource "google_storage_bucket_iam_member" "spaces_persistence_supervisor_object_admin" {
+  count  = var.create_spaces_persistence_bucket ? 1 : 0
+  bucket = google_storage_bucket.spaces_persistence[0].name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.supervisor_storage[0].email}"
+}
+
 # Bind the GSA to the api's KSA (namespace/name the chart creates: see
 # modules/marshal-install's release_name -> "<release_name>-api"). Workload
 # Identity, not a downloaded key — no credential to leak or rotate.
@@ -114,13 +136,23 @@ resource "google_service_account_iam_member" "storage_workload_identity" {
   depends_on = [google_container_cluster.this]
 }
 
-# Also bind the GSA to the SUPERVISOR's KSA. Session pods run in a SEPARATE
+# Bind the SUPERVISOR's own GSA (supervisor_storage, not the shared storage
+# GSA) to the supervisor's KSA. Session pods run in a SEPARATE
 # namespace ("<release_name>-spaces", the chart's spacesNamespace default) under
 # "<release_name>-supervisor", and it's the supervisor — NOT the api — that does
 # the spaces-persistence snapshot/restore blob I/O at session runtime. Without
 # this, the supervisor has no cloud identity and every GCS call 403s (the api's
 # space-storage connection test still passes, since it runs in the api pod, which
 # masks the failure). Gated on the spaces bucket: the supervisor never uses audit.
+#
+# This binding used to sit on the shared storage GSA. Same address, new
+# service_account_id: an existing install's plan REPLACES this one binding
+# (old member removed from the storage GSA, added to supervisor_storage). The
+# api binding above is untouched.
+#
+# setIamPolicy on a service account: when an org policy or missing rights block
+# it (403 on apply), an admin with rights applies the binding by hand, see the
+# README's object-storage section.
 #
 # depends_on the cluster, which is what BRINGS THE POOL INTO EXISTENCE:
 # <project>.svc.id.goog does not exist until the project's first
@@ -132,7 +164,7 @@ resource "google_service_account_iam_member" "storage_workload_identity" {
 # -target apply happens to dodge it, which is why it has stayed hidden.)
 resource "google_service_account_iam_member" "storage_workload_identity_supervisor" {
   count              = var.create_spaces_persistence_bucket ? 1 : 0
-  service_account_id = google_service_account.storage[0].name
+  service_account_id = google_service_account.supervisor_storage[0].name
   role               = "roles/iam.workloadIdentityUser"
   member             = "serviceAccount:${var.project_id}.svc.id.goog[${var.release_name}-spaces/${var.release_name}-supervisor]"
 
@@ -144,7 +176,12 @@ output "audit_persistence_bucket" {
   value       = var.create_audit_persistence_bucket ? "gs://${google_storage_bucket.audit_persistence[0].name}" : null
 }
 
+output "supervisor_storage_service_account" {
+  description = "Email of the supervisor's own GSA (spaces bucket only), annotated on the <release>-supervisor KSA. null when the spaces bucket is off."
+  value       = var.create_spaces_persistence_bucket ? google_service_account.supervisor_storage[0].email : null
+}
+
 output "spaces_persistence_bucket" {
-  description = "gs:// URL for the spaces-persistence bucket — wire via PUT /api/org/space-storage (provider=gcs)."
+  description = "gs:// URL for the spaces-persistence bucket — wire via PUT /api/org/space-storage (provider=gcs), then enable it with PATCH /api/org/space-storage/enabled."
   value       = var.create_spaces_persistence_bucket ? "gs://${google_storage_bucket.spaces_persistence[0].name}" : null
 }

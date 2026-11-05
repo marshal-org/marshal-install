@@ -90,6 +90,7 @@ resource "aws_eks_addon" "ebs_csi" {
   # exactly why the edge belongs here rather than in a troubleshooting note.
   depends_on = [
     aws_eks_node_group.spaces,
+    aws_eks_node_group.spaces_extra,
     aws_eks_node_group.control_plane,
     helm_release.aws_load_balancer_controller,
     # Same shape as the attachment edge on the controller release below, and for
@@ -166,6 +167,7 @@ resource "aws_eks_addon" "metrics_server" {
   # exactly why the edge belongs here rather than in a troubleshooting note.
   depends_on = [
     aws_eks_node_group.spaces,
+    aws_eks_node_group.spaces_extra,
     aws_eks_node_group.control_plane,
     helm_release.aws_load_balancer_controller,
   ]
@@ -279,6 +281,7 @@ resource "helm_release" "aws_load_balancer_controller" {
   # marshal release, then this controller, then the routes and NAT.
   depends_on = [
     aws_eks_node_group.spaces,
+    aws_eks_node_group.spaces_extra,
     aws_eks_node_group.control_plane,
     aws_iam_openid_connect_provider.eks,
     aws_route_table_association.public,

@@ -228,7 +228,13 @@ resource "google_project_service" "containerfilesystem" {
 resource "google_container_node_pool" "spaces" {
   for_each = local.provision ? var.spaces_pools : {}
 
-  depends_on = [google_project_service.containerfilesystem]
+  # The node SA's grants first, or a new pool's first nodes cannot pull images
+  # or ship logs. Empty when the dedicated SA is off.
+  depends_on = [
+    google_project_service.containerfilesystem,
+    google_project_iam_member.nodes_default_node_sa,
+    google_artifact_registry_repository_iam_member.node_reader_dedicated,
+  ]
 
   name     = coalesce(each.value.pool_name, "${var.cluster_name}-${each.key}-pool")
   cluster  = google_container_cluster.this[0].name
@@ -286,9 +292,9 @@ resource "google_container_node_pool" "spaces" {
     machine_type    = each.value.machine_type
     disk_size_gb    = each.value.disk_size_gb
     disk_type       = each.value.disk_type
-    service_account = var.node_service_account != "" ? var.node_service_account : null
+    service_account = local.spaces_pool_sa[each.key] # null = Compute default; see node_service_account.tf
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
-    labels          = { "workload" = each.key }
+    labels          = { "workload" = coalesce(each.value.workload, each.key) }
     spot            = each.value.spot
 
     linux_node_config {
@@ -316,7 +322,7 @@ resource "google_container_node_pool" "spaces" {
       for_each = each.value.taint ? [1] : []
       content {
         key    = "workload"
-        value  = each.key
+        value  = coalesce(each.value.workload, each.key)
         effect = "NO_SCHEDULE"
       }
     }
@@ -335,7 +341,11 @@ resource "google_container_node_pool" "spaces" {
 resource "google_container_node_pool" "control_plane" {
   count = local.provision ? 1 : 0
 
-  depends_on = [google_project_service.containerfilesystem]
+  depends_on = [
+    google_project_service.containerfilesystem,
+    google_project_iam_member.nodes_default_node_sa,
+    google_artifact_registry_repository_iam_member.node_reader_dedicated,
+  ]
 
   name     = "${var.cluster_name}-control-plane-pool"
   cluster  = google_container_cluster.this[0].name
@@ -379,7 +389,7 @@ resource "google_container_node_pool" "control_plane" {
     machine_type    = var.control_plane_machine_type
     disk_size_gb    = var.control_plane_disk_size_gb
     disk_type       = var.control_plane_disk_type
-    service_account = var.node_service_account != "" ? var.node_service_account : null
+    service_account = local.control_plane_sa # null = Compute default; see node_service_account.tf
     oauth_scopes    = ["https://www.googleapis.com/auth/cloud-platform"]
     labels          = { "workload" = "control-plane" }
 

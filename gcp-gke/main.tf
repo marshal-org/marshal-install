@@ -20,12 +20,12 @@ locals {
     "iam.gke.io/gcp-service-account" = google_service_account.storage[0].email
   } : {}
 
-  # Same GSA on the SUPERVISOR's KSA — the supervisor (in session pods) does the
-  # spaces-persistence snapshot/restore blob I/O, so it needs the identity at
-  # runtime. Gated on the spaces bucket specifically (the supervisor never
-  # touches the audit bucket). Paired with the WI binding in buckets.tf.
+  # The SUPERVISOR's KSA gets its own GSA (spaces bucket only), not the shared
+  # storage one: the supervisor (in session pods) does the spaces-persistence
+  # snapshot/restore blob I/O, and a session pod must not reach the audit
+  # bucket. Paired with the WI binding in buckets.tf.
   supervisor_service_account_annotations = var.create_spaces_persistence_bucket ? {
-    "iam.gke.io/gcp-service-account" = google_service_account.storage[0].email
+    "iam.gke.io/gcp-service-account" = google_service_account.supervisor_storage[0].email
   } : {}
 
   # Derived from the SAME toggle that taints the control-plane pool
@@ -63,22 +63,24 @@ locals {
   # something a first install ran into without a word of warning.
   gke_next_steps = join("\n\n", [for p in [
     <<-EOT
-      The load balancer is NOT ready when the apply finishes. GKE takes about
-      5-8 minutes to program it and pass its health checks, HTTP first and
-      HTTPS a few minutes after; until then the URL times out, fails the TLS
-      handshake or answers 502. Watch it:
+      The load balancer is NOT ready when the apply finishes. GKE takes 5 to 15
+      minutes to program it and pass its health checks (measured: 5 to 10 minutes
+      for the address, up to 12.5 for HTTPS), HTTP first and HTTPS a few minutes
+      after; until then the URL times out, fails the TLS handshake or answers 502.
+      Watch it:
         kubectl get ${local.gateway_mode ? "gateway" : "ingress"} -n ${var.namespace} -w
     EOT
     ,
     local.ingress_ip_address == null ? "" : "Ingress IP: ${local.ingress_ip_address} (${var.internal_ingress ? "internal, reachable inside the VPC only" : "external"}). Point ${var.ingress_host} at it.",
     <<-EOT
-      No DNS yet, or working from outside the VPC: see "Reaching Marshal before
-      DNS exists" in gcp-gke/README.md. A kubectl port-forward to the web or api
-      Service is NOT a working path: the console loads, but the CLI's space
-      connect fails through it.
+      No DNS yet, or working from a laptop outside the VPC: see "Reaching Marshal
+      before DNS exists" in gcp-gke/README.md. On chart 0.29 or newer the shortest
+      path needs no bastion: kubectl port-forward -n ${var.namespace} svc/web 8080:80
+      and browse http://localhost:8080. On older charts the console loads but the
+      CLI's space connect fails through a port-forward.
     EOT
     ,
-    var.create_spaces_persistence_bucket ? "" : <<-EOT
+    var.create_spaces_persistence_bucket ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created. Settings > Space Storage > provider GCS, bucket ${google_storage_bucket.spaces_persistence[0].name}, credential fields empty, Save & enable." : <<-EOT
       ⚠ Space storage is OFF (create_spaces_persistence_bucket = false). Until an
         org connects a bucket in Settings > Space Storage, a space keeps its files
         across stop/resume only on a compute size with a persistent disk, and
@@ -143,12 +145,7 @@ module "marshal" {
   webhook_relay_url     = var.webhook_relay_url
   auth_broker_url       = var.auth_broker_url
 
-  # The bundled-datastore image registry (registry_cache.tf) goes FIRST, so a
-  # values_overrides entry of your own still wins over it.
-  values_overrides = concat(
-    length(local.bundled_image_values) > 0 ? [yamlencode(local.bundled_image_values)] : [],
-    var.values_overrides,
-  )
+  values_overrides = var.values_overrides
 
   # When provisioning, install only after both node pools are ready, and (if
   # enabled) after nodes can actually read the cache. Empty (count 0) in the
@@ -165,7 +162,6 @@ module "marshal" {
     google_container_node_pool.spaces,
     google_container_node_pool.control_plane,
     google_artifact_registry_repository_iam_member.node_reader,
-    google_artifact_registry_repository_iam_member.dockerhub_node_reader,
     google_compute_address.ingress,
     google_compute_subnetwork.proxy_only,
     terraform_data.ingress_lb_released,
@@ -199,5 +195,20 @@ check "authorized_networks_supplied" {
   assert {
     condition     = !var.deploy_cluster || var.dns_endpoint_enabled || length(var.master_authorized_networks) > 0
     error_message = "deploy_cluster=true requires master_authorized_networks (at least your admin CIDR) — otherwise you cannot reach the control plane. Set dns_endpoint_enabled=true to reach it over the IAM-gated DNS endpoint instead."
+  }
+}
+
+# Warn (not fail) when the control-plane taint is on but chart_version predates
+# the chart's controlPlane.nodeSelector/tolerations wiring (0.9.0). A version
+# that is not plain MAJOR.MINOR.PATCH (a pre-release, "latest") is not judged.
+check "taint_needs_chart_0_9" {
+  assert {
+    condition = !var.taint_control_plane_pool || try(
+      tonumber(split(".", var.chart_version)[0]) * 1000000 +
+      tonumber(split(".", var.chart_version)[1]) * 1000 +
+      tonumber(split(".", var.chart_version)[2]) >= 9000,
+      true
+    )
+    error_message = "taint_control_plane_pool is true (the default) but chart_version ${var.chart_version} is older than 0.9.0. Those charts ignore the control-plane nodeSelector/tolerations, so the control-plane pods would become unschedulable once the node group is tainted. Upgrade chart_version first, or set taint_control_plane_pool = false."
   }
 }

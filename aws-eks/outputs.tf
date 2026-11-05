@@ -33,15 +33,15 @@ output "next_steps" {
 
 # ── ACM (only populated when this flavor requested the certificate) ──────────
 output "acm_validation_records" {
-  description = "DNS records that prove you own the hostnames, for the manual-DNS path. Includes the preview wildcard (*.preview_domain) when preview_domain is set; a wildcard and its parent domain can share one record name. Add each one in whatever DNS you run, wait for the status below to read ISSUED, then apply again to turn HTTPS on. Empty when acm_request_certificate=false or when Route53 created them for you."
-  value = var.acm_request_certificate && var.acm_validation_route53_zone_id == "" ? [
-    for dvo in aws_acm_certificate.requested[0].domain_validation_options : {
-      domain = dvo.domain_name
-      name   = dvo.resource_record_name
-      type   = dvo.resource_record_type
-      value  = dvo.resource_record_value
+  description = "The DNS records to add, for the manual-DNS path. One entry per distinct record: a wildcard and its parent domain share one CNAME, so it is listed once, with both names under domains. Add each in whatever DNS you run. On Cloudflare the CNAME must be DNS-only (grey cloud), not proxied. Wait for acm_certificate_status_line to read ISSUED, then apply again to turn HTTPS on. Empty when acm_request_certificate=false or when Route53 created them for you."
+  value = [
+    for r in values(local.acm_validation_records) : {
+      domains = r.domains
+      name    = r.name
+      type    = r.type
+      value   = r.value
     }
-  ] : []
+  ]
 }
 
 output "acm_certificate_arn" {
@@ -52,4 +52,25 @@ output "acm_certificate_arn" {
 output "acm_certificate_status" {
   description = "ACM status of a certificate this flavor requested (PENDING_VALIDATION until the records resolve). null otherwise."
   value       = try(local.requested_cert_status, null)
+}
+
+output "acm_certificate_status_line" {
+  description = "One line on where the certificate stands, and what to do next."
+  # On the Route53 path aws_acm_certificate_validation holds the apply until the
+  # cert is ISSUED, and alb_certificate_arn then picks it up, so only the
+  # manual-DNS path ever shows a status other than ISSUED here.
+  value = (
+    var.acm_certificate_arn != "" ? "Certificate: using your own ACM certificate. HTTPS is on." :
+    var.acm_request_certificate ? (
+      local.alb_certificate_arn != "" ? "Certificate: ISSUED. HTTPS is on." :
+      local.requested_cert_status == "PENDING_VALIDATION" ? "Certificate: PENDING_VALIDATION. Add the records in acm_validation_records to your DNS (Cloudflare: DNS-only, grey cloud, not proxied), then apply again. The site is HTTP only until then." :
+      # VALIDATION_TIMED_OUT (ACM gives up after 72 hours), FAILED (a CAA record,
+      # for example), or REVOKED. Adding records now does nothing: ACM never
+      # retries, so the certificate has to be requested again.
+      "Certificate: ${local.requested_cert_status}. ACM will not retry this one. Request a new one with: terraform apply -replace='aws_acm_certificate.requested[0]', then add the new records in acm_validation_records. The site is HTTP only until then."
+    ) :
+    local.create_alb_cert ? "Certificate: imported into ACM (placeholder or your PEM). HTTPS is on." :
+    lookup(var.ingress_annotations, "alb.ingress.kubernetes.io/certificate-arn", "") != "" ? "Certificate: the ARN set in ingress_annotations. HTTPS is on if that certificate is ISSUED." :
+    "Certificate: none. The ALB serves HTTP only."
+  )
 }
