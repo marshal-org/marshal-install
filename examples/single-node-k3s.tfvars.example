@@ -17,7 +17,7 @@ registry_pull_token = "mrpt_9f3c…"                            # registry pull 
 
 # The product version to install (== chart version). Current: 0.5.0 — use the
 # version from your onboarding email, or `helm show chart …` after logging in.
-chart_version = "0.33.1" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.37.1" # the version this installer was published for; confirm against your onboarding
 
 # Hostname for the console + API. No real DNS? Use sslip.io against the node's
 # public IP (dashes for dots): marshal.<NODE-IP-DASHED>.sslip.io
@@ -30,16 +30,20 @@ ingress_host = "marshal.acme.com"
 
 # ── Datastores (default: in-cluster Postgres + Redis are provisioned for you) ─
 # On a single node both run in-cluster (Postgres on a local-path PVC; Redis is
-# ephemeral). For a durable managed Postgres instead, uncomment:
+# the chart's bundled one, ephemeral). For a durable managed Postgres instead, uncomment:
 # provision_datastores = false
 # database_url         = "postgres://marshal:PW@10.0.0.5:5432/marshal?sslmode=require"
 # redis_url            = "redis://10.0.0.6:6379"
 # postgres_storage     = "10Gi"
 
-# ── TLS (default: HTTP only — fine for an sslip.io test) ──────────────────────
+# ── TLS (default: HTTPS with a self-signed placeholder certificate) ──────────
+# tls_mode defaults to "self_signed". For plain HTTP (an sslip.io test), set:
+# tls_mode            = "none"
 # For real TLS via cert-manager (install it first + create a ClusterIssuer):
 # ingress_annotations = { "cert-manager.io/cluster-issuer" = "letsencrypt" }
-# ingress_tls         = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]
+# tls_mode            = "secret"   # Terraform leaves the marshal-tls Secret to cert-manager
+# Then send plain HTTP to https ("redirect") or refuse it ("off"):
+# http_mode           = "redirect"
 
 # ── Session port-previews (optional) ─────────────────────────────────────────
 # preview_domain = "preview.acme.com"

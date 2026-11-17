@@ -2,6 +2,11 @@
 
 Terraform that installs **Marshal** into a Kubernetes cluster you control.
 
+[Marshal](https://marshal.codes/?utm_source=github&utm_medium=readme&utm_campaign=marshal-install)
+runs AI coding agents in isolated pods inside your own VPC, with credential isolation, audited
+egress and live tool policies. New to Marshal? Start at [marshal.codes](https://marshal.codes/?utm_source=github&utm_medium=readme&utm_campaign=marshal-install&utm_content=intro)
+or [book a demo](https://marshal.codes/?utm_source=github&utm_medium=readme&utm_campaign=marshal-install&utm_content=demo#demo).
+
 ```
 modules/marshal-install/   # the shared install logic: namespace, secrets, the umbrella Helm chart
 single-node-k3s/           # one node running k3s, optional in-cluster Postgres and Redis
@@ -92,7 +97,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.33.1 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.37.1 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -175,4 +180,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.33.1`, published as `v0.33.1`.
+Generated for Marshal chart version `0.37.1`, published as `v0.37.1`.

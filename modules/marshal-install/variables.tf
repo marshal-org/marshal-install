@@ -286,6 +286,27 @@ variable "ingress_mode" {
   }
 }
 
+variable "http_mode" {
+  description = <<-EOT
+    What plain HTTP (port 80) does on the app and preview hosts (chart ingress.http; needs a chart that has it):
+      "serve"    (default) answer HTTP like HTTPS — nothing changes.
+      "redirect" permanent redirect to the same URL on https.
+      "off"      no HTTP at all.
+    redirect/off need HTTPS set up (tls_mode other than "none", gateway.cert_manager_certs, or on ALB a
+    certificate) and preview_scheme = "https". Not every load balancer can do both: a GKE internal
+    Ingress (gce-internal) can only do "off" (use ingress_mode = "gateway" to redirect), and
+    ingress-nginx can only do "redirect". The plan fails on a combination that cannot work.
+  EOT
+  type        = string
+  default     = "serve"
+  nullable    = false
+
+  validation {
+    condition     = contains(["serve", "redirect", "off"], var.http_mode)
+    error_message = "http_mode must be \"serve\", \"redirect\" or \"off\"."
+  }
+}
+
 variable "gateway" {
   description = <<-EOT
     Gateway settings, used only when ingress_mode = "gateway" (chart ingress.gateway.*):

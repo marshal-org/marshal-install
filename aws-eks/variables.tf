@@ -764,6 +764,18 @@ variable "preview_domain" {
   default     = ""
 }
 
+variable "http_mode" {
+  description = "What plain HTTP does on the ALB once a certificate is attached: \"redirect\" (default, as every aws-eks install has done) sends it to https, \"off\" removes the HTTP listener, \"serve\" answers HTTP like HTTPS. Until a certificate is attached HTTP is always served."
+  type        = string
+  default     = "redirect"
+  nullable    = false
+
+  validation {
+    condition     = contains(["serve", "redirect", "off"], var.http_mode)
+    error_message = "http_mode must be \"serve\", \"redirect\" or \"off\"."
+  }
+}
+
 variable "preview_scheme" {
   description = "\"https\" or \"http\" for preview URLs."
   type        = string

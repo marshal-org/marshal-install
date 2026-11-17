@@ -34,7 +34,8 @@ defaults.
   an API that is already on is left alone. If your organization enables APIs
   centrally, set `enable_project_apis = false` and enable them first:
   ```bash
-  gcloud services enable compute.googleapis.com container.googleapis.com \
+  gcloud services enable cloudresourcemanager.googleapis.com \
+    compute.googleapis.com container.googleapis.com \
     artifactregistry.googleapis.com secretmanager.googleapis.com \
     iam.googleapis.com iamcredentials.googleapis.com storage.googleapis.com \
     sqladmin.googleapis.com servicenetworking.googleapis.com \
@@ -43,6 +44,15 @@ defaults.
   The Artifact Registry service agent the registry cache needs is created by
   the same apply (through the `google-beta` provider, which `terraform init`
   downloads), so a fresh project installs in one apply, not three.
+- **One API the apply cannot enable: Cloud Resource Manager.** The plan reads
+  the project number (`data "google_project"` in `registry_cache.tf`), so it
+  needs this API before Terraform runs. On a fresh project, or when your ADC
+  quota project is the new project, the first plan otherwise fails with
+  `Cloud Resource Manager API has not been used in project <project> before or it is disabled`.
+  Enable it once, before `terraform plan`:
+  ```bash
+  gcloud services enable cloudresourcemanager.googleapis.com --project <project>
+  ```
 - A **Postgres 16** the cluster can reach over the VPC (Cloud SQL private IP) —
   Postgres is the durable source of truth (external is recommended). On a new
   cluster (`deploy_cluster = true`) its VPC does not exist yet, so the install
@@ -1074,6 +1084,10 @@ no pool is replaced. Set `pin_bundled_datastores = false` next to
 Then `terraform init -upgrade`, `terraform plan` (it should replace nothing you
 did not choose), and `terraform apply`. Roll back with
 `helm rollback marshal -n marshal`.
+If a plan shows `registryAuth.secret.password` in clear text, that value
+comes from the release record of an apply made by an older installer. It
+shows once: after this apply, plans print `(sensitive value)`. Do not share
+plan output that shows it.
 
 **Upgrading this flavor's code from a version without
 `create_node_service_account`:** pin every existing node pool to

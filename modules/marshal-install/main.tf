@@ -6,7 +6,8 @@
 # (marshal/docs/deploy/install.md) does by hand:
 #   1. create the control-plane namespace
 #   2. create the license (installation JWT) Secret
-#   3. create the datastore DSN Secrets (external mode)
+#   3. create the datastore DSN Secrets (external mode) or, for the bundled
+#      Redis, its two ACL passwords
 #   4. helm install the umbrella chart with values assembled from the inputs
 #
 # The registry pull credential is NOT created here as a standalone Secret — the
@@ -42,14 +43,18 @@ locals {
   # default of registry.marshal.codes.
   registry_secret_server = var.registry_secret_server != "" ? var.registry_secret_server : split("/", local.effective_registry)[0]
 
-  # registryAuth block — shape depends on the mode.
+  # registryAuth block — shape depends on the mode. The password is NOT here:
+  # it goes in through set_sensitive on the release. A value in `values` is
+  # stored in the release's `metadata`, which the helm provider does not mark
+  # sensitive, so every later plan that changes the release printed the token
+  # in clear text (0.33.1 upgrade rehearsal). set_sensitive values are masked
+  # there.
   registry_auth = merge(
     { mode = var.registry_auth_mode },
     var.registry_auth_mode == "secret" ? {
       secret = {
         server   = local.registry_secret_server
         username = var.deployment_id
-        password = var.registry_pull_token
       }
     } : {},
   )
@@ -114,6 +119,9 @@ locals {
       # One attribute per conditional: a two-attribute object and {} have no
       # common type, and validate does not catch it, only plan does.
       var.ingress_mode == "gateway" ? { mode = "gateway" } : {},
+      # Only set when not "serve", for the same reason: an install that never
+      # sets http_mode sends exactly the values it did before.
+      var.http_mode == "serve" ? {} : { http = var.http_mode },
       var.ingress_mode == "gateway" ? {
         gateway = merge(
           { healthCheckPolicy = var.gateway.health_check_policy },
@@ -168,7 +176,9 @@ locals {
   # keys, so a shallow merge is correct and collision-free.
   chart_values = merge(
     {
-      global          = { registry = local.effective_registry }
+      global = merge(
+        { registry = local.effective_registry },
+      )
       registryAuth    = local.registry_auth
       auth            = { basic = { enabled = var.basic_auth_enabled } }
       spacesNamespace = var.spaces_namespace
@@ -254,6 +264,17 @@ resource "kubernetes_secret" "redis" {
   depends_on = [kubernetes_namespace.marshal]
 }
 
+# ── Bundled Redis ACL passwords ──────────────────────────────────────────────
+# The chart gives the bundled Redis two users (marshal#2218): `marshal` for the
+# api and gateway, `spaces` for space pods. The chart creates the Secret with
+# their passwords itself (`<release>-redis-auth`) and keeps them across
+# `helm upgrade` through a lookup, so this module creates nothing for them.
+#
+# It used to generate the passwords and a Secret here. That clashed with the
+# Secret an existing install already has (the chart made it, Helm owns it):
+# `secrets "marshal-redis-auth" already exists` on the first apply, and after an
+# import Helm deleted the Secret again. Leave it to the chart.
+
 # ── The umbrella chart ───────────────────────────────────────────────────────
 resource "helm_release" "marshal" {
   name      = var.release_name
@@ -266,6 +287,51 @@ resource "helm_release" "marshal" {
   timeout = 900 # 15m — first install pulls images + runs migrations
 
   values = concat([yamlencode(local.chart_values)], var.values_overrides)
+
+  # The pull token, kept out of `values` (see local.registry_auth).
+  dynamic "set_sensitive" {
+    for_each = var.registry_auth_mode == "secret" ? [1] : []
+    content {
+      name  = "registryAuth.secret.password"
+      value = var.registry_pull_token
+    }
+  }
+
+  # http_mode: the same checks the chart makes at render time (marshal.ingressHttp),
+  # here so they fail the plan instead of a half-done apply.
+  lifecycle {
+    precondition {
+      condition = var.http_mode == "serve" || length(local.effective_ingress_tls) > 0 || (
+        var.ingress_mode == "gateway" && length(var.gateway.cert_manager_certs) > 0
+        ) || (
+        var.ingress_mode == "ingress" && var.ingress_class_name == "alb" && lookup(var.ingress_annotations, "alb.ingress.kubernetes.io/certificate-arn", "") != ""
+        ) || (
+        # A GKE Ingress can serve HTTPS from a Google-managed or pre-shared
+        # certificate with no TLS Secret at all (tls_mode = "none").
+        var.ingress_mode == "ingress" && contains(["gce", "gce-internal"], var.ingress_class_name) && (
+          lookup(var.ingress_annotations, "networking.gke.io/managed-certificates", "") != "" ||
+          lookup(var.ingress_annotations, "ingress.gcp.kubernetes.io/pre-shared-cert", "") != ""
+        )
+      )
+      error_message = "http_mode = \"${var.http_mode}\" needs HTTPS first: a tls_mode other than \"none\", gateway.cert_manager_certs, on aws-eks an ACM certificate, or on GKE a managed-certificates / pre-shared-cert annotation."
+    }
+    precondition {
+      condition     = var.http_mode == "serve" || var.preview_domain == "" || var.preview_scheme == "https"
+      error_message = "http_mode = \"${var.http_mode}\" with preview_scheme = \"http\": preview links and the app's public URL would be http://. Set preview_scheme = \"https\"."
+    }
+    precondition {
+      condition     = var.http_mode == "serve" || var.ingress_mode == "gateway" || contains(["alb", "traefik", "nginx", "gce", "gce-internal"], var.ingress_class_name)
+      error_message = "http_mode = \"${var.http_mode}\" is not supported for ingress_class_name \"${var.ingress_class_name}\" (supported: alb, traefik, nginx, gce, gce-internal, or ingress_mode = \"gateway\")."
+    }
+    precondition {
+      condition     = !(var.http_mode == "redirect" && var.ingress_mode == "ingress" && var.ingress_class_name == "gce-internal")
+      error_message = "http_mode = \"redirect\" is not possible on a GKE internal Ingress: its only redirect (FrontendConfig) works on external load balancers only. Use http_mode = \"off\", or ingress_mode = \"gateway\", which can redirect."
+    }
+    precondition {
+      condition     = !(var.http_mode == "off" && var.ingress_mode == "ingress" && var.ingress_class_name == "nginx")
+      error_message = "http_mode = \"off\" is not possible on ingress-nginx: the controller listens on port 80 for every Ingress. Use http_mode = \"redirect\"."
+    }
+  }
 
   depends_on = [
     kubernetes_namespace.marshal,

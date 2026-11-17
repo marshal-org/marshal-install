@@ -67,6 +67,19 @@ locals {
   )
 }
 
+# output precondition, not `check` or a variable validation: see harbor.tf's
+# _harbor_cache_requires_provisioning. The role and the buckets need the OIDC
+# provider this flavor creates only when deploy_cluster = true. The
+# service-account annotations in main.tf are gated the same way, so this
+# message is the only error a reused cluster sees.
+output "_storage_buckets_require_provisioning" {
+  value = null
+  precondition {
+    condition     = !local.create_any_storage_bucket || local.provision
+    error_message = "create_audit_persistence_bucket / create_spaces_persistence_bucket = true require deploy_cluster = true: the IRSA role needs the OIDC provider this flavor creates. On a reused cluster, bring your own bucket and IRSA role and set api_service_account_annotations / supervisor_service_account_annotations instead."
+  }
+}
+
 data "aws_caller_identity" "storage" {
   count = local.create_storage ? 1 : 0
 }
@@ -210,10 +223,10 @@ resource "aws_iam_role_policy" "storage_s3" {
 
 output "audit_persistence_bucket" {
   description = "s3:// URL for the audit-persistence bucket, once you're ready to wire it via the per-org audit API config."
-  value       = var.create_audit_persistence_bucket ? "s3://${aws_s3_bucket.audit_persistence[0].bucket}" : null
+  value       = length(aws_s3_bucket.audit_persistence) > 0 ? "s3://${aws_s3_bucket.audit_persistence[0].bucket}" : null
 }
 
 output "spaces_persistence_bucket" {
   description = "s3:// URL for the spaces-persistence bucket — wire via PUT /api/org/space-storage (provider=s3), then enable it with PATCH /api/org/space-storage/enabled."
-  value       = var.create_spaces_persistence_bucket ? "s3://${aws_s3_bucket.spaces_persistence[0].bucket}" : null
+  value       = length(aws_s3_bucket.spaces_persistence) > 0 ? "s3://${aws_s3_bucket.spaces_persistence[0].bucket}" : null
 }

@@ -12,8 +12,8 @@ locals {
     or newer; on older charts run the CLI from inside the VPC (the bastion).
     Details, and an internet-facing option: "Reaching the app" in aws-eks/README.md.
 
-    ${var.create_spaces_persistence_bucket ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created.\n    Settings > Space Storage > provider Amazon S3, bucket ${aws_s3_bucket.spaces_persistence[0].bucket}, region ${var.region}, credential fields empty, Save & enable." : "Space storage is OFF (create_spaces_persistence_bucket = false): a space that is stopped on a size without a persistent disk LOSES its workspace."}
-    ${var.create_audit_persistence_bucket ? "Audit export: Settings > Auditing > Storage > provider Amazon S3, bucket ${aws_s3_bucket.audit_persistence[0].bucket}, region ${var.region}, Save & enable." : ""}
+    ${length(aws_s3_bucket.spaces_persistence) > 0 ? "Space storage: the bucket exists, but stop/resume only keeps a workspace once an owner connects AND enables it, before the first space is created.\n    Settings > Space Storage > provider Amazon S3, bucket ${aws_s3_bucket.spaces_persistence[0].bucket}, region ${var.region}, credential fields empty, Save & enable." : "Space storage is OFF (create_spaces_persistence_bucket = false): a space that is stopped on a size without a persistent disk LOSES its workspace."}
+    ${length(aws_s3_bucket.audit_persistence) > 0 ? "Audit export: Settings > Auditing > Storage > provider Amazon S3, bucket ${aws_s3_bucket.audit_persistence[0].bucket}, region ${var.region}, Save & enable." : ""}
 
     If an apply is interrupted (expired credentials, a closed laptop), run
     terraform plan before applying again: a cluster whose create did not finish is
@@ -58,9 +58,15 @@ locals {
     # Everything below is set only once a certificate is attached (an ISSUED
     # cert, an imported one, or your own ARN). The redirect must never exist
     # without the HTTPS listener, or the first apply sends HTTP to a dead :443.
+    #
+    # http_mode decides the HTTP side. These annotations are set here, not
+    # only through the chart's ingress.http, so a chart older than ingress.http
+    # still gets them; on a newer chart both write the same values.
     local.alb_certificate_arn != "" ? {
       "alb.ingress.kubernetes.io/certificate-arn" = local.alb_certificate_arn
-      "alb.ingress.kubernetes.io/listen-ports"    = jsonencode([{ HTTP = 80 }, { HTTPS = 443 }])
+      "alb.ingress.kubernetes.io/listen-ports"    = var.http_mode == "off" ? jsonencode([{ HTTPS = 443 }]) : jsonencode([{ HTTP = 80 }, { HTTPS = 443 }])
+    } : {},
+    local.alb_certificate_arn != "" && var.http_mode == "redirect" ? {
       # The AWS Load Balancer Controller's purpose-built redirect mechanism —
       # NOT the generic alb.ingress.kubernetes.io/actions.${name} annotation
       # (tried first, reverted: that one applies whatever Ingress rule you
@@ -111,14 +117,14 @@ locals {
   # since it's the one this flavor's own resources actually depend on.
   api_service_account_annotations = merge(
     var.api_service_account_annotations,
-    local.create_any_storage_bucket ? {
+    local.create_storage ? {
       "eks.amazonaws.com/role-arn" = aws_iam_role.storage[0].arn
     } : {},
   )
 
   supervisor_service_account_annotations = merge(
     var.supervisor_service_account_annotations,
-    var.create_spaces_persistence_bucket ? {
+    local.create_storage && var.create_spaces_persistence_bucket ? {
       "eks.amazonaws.com/role-arn" = aws_iam_role.storage[0].arn
     } : {},
   )
@@ -172,6 +178,9 @@ module "marshal" {
   tls_secret_name     = var.tls_secret_name
   preview_domain      = var.preview_domain
   preview_scheme      = var.preview_scheme
+  # Before a certificate is attached there is no HTTPS listener to send anyone
+  # to, so HTTP is served as is until then (same rule as the annotations above).
+  http_mode = local.alb_certificate_arn != "" ? var.http_mode : "serve"
 
   webhook_relay_enabled = var.webhook_relay_enabled
   webhook_relay_url     = var.webhook_relay_url

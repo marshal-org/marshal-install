@@ -29,14 +29,15 @@ module "marshal" {
   registry             = var.registry
   registry_auth_mode   = var.registry_auth_mode
 
-  # Datastores — both run in-cluster on this single node (or BYO external), so both
-  # are "external" DSNs from the module's view. (Redis on k3s is the flavor's own
-  # in-cluster instance, which already satisfies the "bundled Redis" recommendation
-  # — no managed Redis cost.)
+  # Datastores. Postgres runs in-cluster as this flavor's own Deployment (or BYO),
+  # so it is an "external" DSN from the module's view. Redis is the chart's bundled
+  # one whenever this flavor provisions datastores: the chart gives it the ACL users
+  # (marshal#2219) and the chart generates their passwords (<release>-redis-auth).
+  # With provision_datastores = false the operator's own redis_url is used instead.
   database_mode = "external"
-  redis_mode    = "external"
+  redis_mode    = local.provision ? "bundled" : "external"
   database_url  = local.database_url
-  redis_url     = local.redis_url
+  redis_url     = var.redis_url
 
   # Routing.
   ingress_host        = var.ingress_host
@@ -50,6 +51,7 @@ module "marshal" {
   tls_secret_name     = var.tls_secret_name
   preview_domain      = var.preview_domain
   preview_scheme      = var.preview_scheme
+  http_mode           = var.http_mode
 
   webhook_relay_enabled = var.webhook_relay_enabled
   webhook_relay_url     = var.webhook_relay_url
@@ -61,8 +63,6 @@ module "marshal" {
     kubernetes_namespace.marshal,
     kubernetes_deployment.postgres,
     kubernetes_service.postgres,
-    kubernetes_deployment.redis,
-    kubernetes_service.redis,
   ]
 }
 

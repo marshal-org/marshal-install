@@ -166,6 +166,7 @@ because each one otherwise fails partway:
 |---|---|
 | Signed in, and Terraform can see it | `gcloud auth list`. Terraform's Google providers read Application Default Credentials (`gcloud auth application-default login`), **not** a plain `gcloud auth login`. If they only did the latter, `export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)`. It lasts about an hour, so refresh it before a long apply or destroy. |
 | Billing is on, and they may enable APIs | `gcloud billing projects describe <project>`. The installer enables the APIs it needs (`enable_project_apis`), which needs `serviceusage.services.enable`; if their organization enables APIs centrally, set it `false` and enable them first (the README lists the command). |
+| Plan-time API | The plan reads the project number, so Cloud Resource Manager must be on before Terraform runs; the apply cannot enable it. On a fresh project, or when the ADC quota project is the new project, the first plan otherwise fails with `Cloud Resource Manager API has not been used in project <project> before or it is disabled`. `gcloud services enable cloudresourcemanager.googleapis.com --project <project>`. |
 | CPU quota | On a fresh project the Compute API is off and every `gcloud compute` call fails with `SERVICE_DISABLED`, so enable it first: `gcloud services enable compute.googleapis.com --project <project>` (the apply enables it anyway; this only runs it earlier). Then `gcloud compute project-info describe --project <project> --format=json` for `CPUS_ALL_REGIONS`, and `gcloud compute regions describe <region> --project <project> --format=json` for the regional `CPUS` and `SSD_TOTAL_GB`. Add up the vCPUs of the control-plane pool (default `e2-standard-8`) and the spaces pool (default `e2-standard-8`) at their **starting** node count, times the number of zones for a regional `location`, and compare. A 32 vCPU project cannot go higher by self-service, so start a quota request first if the pools are sized up. |
 | Disk quota | The regional `SSD_TOTAL_GB` quota (often 500 GB) counts `pd-balanced` too. The defaults are a 300 GB spaces disk and a 50 GB control-plane disk, one node of each per zone: for a 3-zone region that is 1050 GB, so ask for 1200 GB or more before the apply. A bigger `disk_size_gb` multiplies it. |
 | Region and zones | `location` is a region or a zone; a region creates one node per zone for each pool, so the quota above is per zone count. A regional create needs capacity in every zone at once: if it fails with `GCE_STOCKOUT` (measured at about 3m50s, twice, in `europe-west1`), use a zonal `location` such as `europe-west1-b`, which came up in 8m22s. Recover from the failed create as in section 4. |
@@ -642,6 +643,21 @@ assuming.
 - **The load balancer, its target groups, and any security group the controller
   created**, if the controller lost its IAM policy before it finished its own
   cleanup. Step 4 prevents this as well.
+- **Two things EKS creates itself, which block the VPC delete.** If the destroy
+  sits on `aws_subnet.private` or `aws_vpc.this` for more than a few minutes,
+  look for (1) a leftover VPC CNI network interface in the subnet (description
+  `aws-K8S-i-...`, status `available`): `aws ec2 delete-network-interface
+  --region <region> --network-interface-id <eni>`; and (2) the cluster security group
+  `eks-cluster-sg-<cluster_name>-*`, which EKS made and Terraform never owned:
+  `aws ec2 delete-security-group --region <region> --group-id <sg>`. The destroy then finishes on
+  its own retry or a re-run. Seen on the 0.37.1 upgrade rehearsal.
+- **A storage bucket, with its data**, even after `Destroy complete!`. If the
+  refresh at the start of the destroy reads a bucket as missing, Terraform drops
+  it from state without a message and never deletes it. Seen once on the spaces
+  bucket after an upgrade. Check both names after every destroy:
+  `aws s3api head-bucket --bucket <cluster_name>-spaces-persistence-<account_id>`
+  (and `-audit-persistence-`); remove a survivor with
+  `aws s3 rb --force s3://<name> --region <region>`.
 
 Subnet tags your subnets already carried are **not** in that list and are not at
 risk: the installer skips any tag that was already there, so a destroy leaves it
@@ -810,7 +826,11 @@ Hand that to Marshal support.
   deletion protection and the final snapshot are all deliberate. If one blocks
   the install, the input is wrong, not the check.
 - **Never print or commit their secrets.** The licence token, registry token
-  and database password all live in files that stay untracked.
+  and database password all live in files that stay untracked. On an upgrade,
+  the first plan can show `registryAuth.secret.password` in clear text once: it
+  comes from the release record of an apply made by an older installer, and the
+  plans after that apply print `(sensitive value)`. Do not paste that first plan
+  output anywhere.
 - **Stop and ask when an answer would change what gets created**, especially
   anything that replaces a node group, a database or a network.
 - Upgrading is `chart_version` plus `terraform apply`, after you have worked through

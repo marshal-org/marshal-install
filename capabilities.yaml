@@ -256,3 +256,77 @@ capabilities:
     enable: "nothing to set"
     disable: "nothing to set"
     needs: ""
+
+  - id: k3s-bundled-redis
+    since: 0.37.1
+    flavors: [single-node-k3s]
+    variables: [provision_datastores, redis_url]
+    kind: default-changed
+    default: "the chart's bundled Redis (redis_mode = bundled) whenever provision_datastores = true"
+    previous: "the flavor's own password-less redis:7-alpine Deployment, passed to the chart as an external Redis"
+    when: before
+    disruptive: true
+    effect_on_existing: >-
+      With provision_datastores = true (the default) the plan destroys the flavor's
+      own marshal-redis Deployment and Service and the chart starts its bundled
+      Redis on a local-path PVC, with the per-user ACL passwords (a restricted
+      user for space pods that cannot create SSH connection credentials). Redis
+      holds only ephemeral state, so only in-flight state is lost: open event
+      streams, WS tokens, OAuth state, queued usage counters; clients re-create
+      these on reconnect. The api and gateway restart onto the new Redis during the apply. Postgres is untouched.
+      With provision_datastores = false nothing changes: your redis_url is used.
+    question: >-
+      The apply replaces the in-cluster Redis with the chart's bundled one, which
+      adds the Redis ACL users. Only in-flight state is lost; go ahead?
+    recommend: "Yes. Redis state is rebuildable, and the new Redis closes the SSH-credential gap on this flavor."
+    enable: "nothing to set (provision_datastores = true is the default)"
+    disable: "provision_datastores = false\nredis_url = \"redis://HOST:6379\"   # plus database_url"
+    needs: "a chart release that includes the Redis ACL users (marshal#2219); an older chart still gets a bundled Redis, without them"
+
+  - id: bundled-redis-acl
+    since: 0.37.1
+    flavors: [aws-eks, gcp-gke]
+    variables: [redis_mode]
+    kind: default-changed
+    default: "the chart's bundled Redis runs with two ACL users (marshal for the api and gateway, spaces for space pods); the chart creates and keeps their passwords"
+    previous: "a password-less bundled Redis"
+    when: before
+    disruptive: false
+    effect_on_existing: >-
+      Applies only with redis_mode = bundled (the default) and a chart release that
+      includes the Redis ACL users (marshal#2218). The chart creates the Secret
+      <release>-redis-auth itself and keeps its passwords across upgrades, so the
+      installer creates nothing and there is nothing to import. The bundled Redis
+      restarts once onto the ACL file, and the api and gateway reconnect with their
+      new password. Redis holds only ephemeral state: open event streams, WS tokens
+      and OAuth state are re-created on reconnect. An install on an external Redis
+      (redis_mode = external) is untouched.
+    question: >-
+      The upgrade restarts the bundled Redis once to turn on its ACL users. Only
+      in-flight state is lost; go ahead?
+    recommend: "Yes. It closes the SSH-credential gap for space pods, and Redis state is rebuildable."
+    enable: "nothing to set (redis_mode = bundled is the default)"
+    disable: "redis_mode = \"external\"\nredis_url = \"redis://HOST:6379\""
+    needs: "a chart release that includes the Redis ACL users (marshal#2218)"
+
+  - id: http-mode
+    since: 0.37.1
+    flavors: [aws-eks, gcp-gke, single-node-k3s]
+    variables: [http_mode]
+    kind: new-feature
+    default: "\"serve\" on gcp-gke and single-node-k3s; \"redirect\" on aws-eks"
+    when: after
+    disruptive: false
+    effect_on_existing: >-
+      Nothing. gcp-gke and single-node-k3s keep answering plain HTTP; aws-eks keeps
+      redirecting it to https once a certificate is attached, as it always has.
+    question: >-
+      Marshal can now redirect plain http:// to https://, or refuse HTTP altogether.
+      Do you want that for this install?
+    recommend: >-
+      Yes, "redirect", once HTTPS works with a trusted certificate. On gcp-gke with
+      the default internal Ingress only "off" is possible (or move to
+      ingress_mode = "gateway" to redirect).
+    enable: "http_mode = \"redirect\"   # or \"off\""
+    disable: "http_mode = \"serve\""
+    needs: "a chart release with ingress.http (marshal#2354); on an older chart only aws-eks honours it. TLS (tls_mode other than none) and preview_scheme = \"https\"."

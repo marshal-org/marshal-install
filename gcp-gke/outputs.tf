@@ -103,6 +103,12 @@ output "next_steps" {
 # the cluster name, project, cache repo, buckets or the taint toggle.
 output "argocd_derived_values" {
   description = "GKE-derived chart values as YAML, for the ArgoCD Application when install_marshal = false. Everything else in that Application is a value you already chose in tfvars; these are the ones terraform computed."
+  # Evaluated on every plan, so this fails both install paths (terraform and
+  # ArgoCD) at plan time; the module's own preconditions cover the rest.
+  precondition {
+    condition     = !(var.http_mode == "redirect" && !local.gateway_mode && local.effective_ingress_class == "gce-internal")
+    error_message = "http_mode = \"redirect\" is not possible on a GKE internal Ingress (internal_ingress = true): its only redirect (FrontendConfig) works on external load balancers only. Use http_mode = \"off\", or ingress_mode = \"gateway\", which can redirect."
+  }
   value = yamlencode(merge(
     {
       global            = { registry = local.effective_registry }
@@ -116,6 +122,7 @@ output "argocd_derived_values" {
           className   = local.effective_ingress_class
           annotations = local.effective_ingress_annotations
         }],
+        var.http_mode == "serve" ? [] : [{ http = var.http_mode }],
         local.gateway_mode ? [{
           mode = "gateway"
           gateway = merge(concat(

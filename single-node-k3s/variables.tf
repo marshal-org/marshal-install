@@ -83,12 +83,13 @@ variable "extra_ingress_hosts" {
 
 # ── In-cluster datastores (default: provisioned for you) ─────────────────────
 # k3s has no managed Postgres/Redis, so by default this flavor deploys a minimal
-# postgres:16 + redis:7 into the cluster (local-path PVC for Postgres). Fine for a
-# single-node / evaluation deployment. For a durable production datastore, set
-# provision_datastores=false and supply your own DSNs below.
+# postgres:16 into the cluster (local-path PVC) and turns on the chart's bundled
+# Redis (also a local-path PVC). Fine for a single-node / evaluation deployment.
+# For a durable production datastore, set provision_datastores=false and supply
+# your own DSNs below.
 
 variable "provision_datastores" {
-  description = "true = deploy in-cluster Postgres + Redis. false = you supply database_url + redis_url (managed/external)."
+  description = "true = deploy in-cluster Postgres and the chart's bundled Redis. false = you supply database_url + redis_url (managed/external)."
   type        = bool
   default     = true
 }
@@ -111,12 +112,6 @@ variable "postgres_image" {
   description = "Image for the in-cluster Postgres (provision_datastores=true). Pulled from your `registry` prefix path automatically? No — this is a public image, pulled directly. Override to mirror it if your node has no public egress."
   type        = string
   default     = "postgres:16-alpine"
-}
-
-variable "redis_image" {
-  description = "Image for the in-cluster Redis (provision_datastores=true)."
-  type        = string
-  default     = "redis:7-alpine"
 }
 
 variable "postgres_storage" {
@@ -216,6 +211,18 @@ variable "preview_domain" {
   description = "Wildcard host for session port-previews, e.g. \"preview.acme.com\". \"\" disables previews."
   type        = string
   default     = ""
+}
+
+variable "http_mode" {
+  description = "What plain HTTP does: \"serve\" (default) answers it like HTTPS, \"redirect\" sends it to https, \"off\" refuses it (Traefik: the app is served on the websecure entrypoint only). Needs tls_mode other than \"none\" and preview_scheme = \"https\"."
+  type        = string
+  default     = "serve"
+  nullable    = false
+
+  validation {
+    condition     = contains(["serve", "redirect", "off"], var.http_mode)
+    error_message = "http_mode must be \"serve\", \"redirect\" or \"off\"."
+  }
 }
 
 variable "preview_scheme" {

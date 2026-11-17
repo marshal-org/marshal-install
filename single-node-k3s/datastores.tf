@@ -1,11 +1,14 @@
-# The control-plane namespace + (optionally) a minimal in-cluster Postgres 16 and
-# Redis 7. This flavor owns the namespace (the shared module is called with
-# create_namespace=false) so these datastore resources can live in it.
+# The control-plane namespace + (optionally) a minimal in-cluster Postgres 16.
+# This flavor owns the namespace (the shared module is called with
+# create_namespace=false) so the Postgres resources can live in it.
 #
-# The chart's bundled Bitnami subcharts are intentionally NOT used — upstream
-# pulled their Docker Hub tags, and this hand-rolled pair is simpler for a single
-# node. It has no HA/backups: fine for evaluation, not for durable production
-# (use provision_datastores=false + a managed datastore for that).
+# Redis is NOT deployed here: with provision_datastores=true the chart's bundled
+# Redis runs (redis_mode="bundled", see main.tf), on a local-path PVC, with the
+# ACL users and password Secret the shared module generates.
+#
+# The chart's bundled Postgres is intentionally NOT used — this hand-rolled one is
+# simpler for a single node. It has no HA/backups: fine for evaluation, not for
+# durable production (use provision_datastores=false + a managed datastore).
 
 locals {
   # In-cluster datastores only in the INSTALL path (deploy_cluster = false). In the
@@ -13,14 +16,14 @@ locals {
   install   = !var.deploy_cluster
   provision = local.install && var.provision_datastores
 
-  # DSNs handed to the install module. When we provision in-cluster datastores we
-  # build them from the Service names + generated password; otherwise pass through.
+  # Postgres DSN handed to the install module. When we provision the in-cluster
+  # Postgres we build it from the Service name + generated password; otherwise
+  # pass through.
   # try(...) is null-safe: a conditional evaluates BOTH branches, so indexing [0]
   # here would blow up ("index 0 out of range") when provision_datastores = false
   # and random_password.postgres has count = 0. The "" fallback also keeps the
   # (unused) template from failing on a null interpolation.
   database_url = local.provision ? "postgres://marshal:${try(random_password.postgres[0].result, "")}@marshal-postgres.${var.namespace}.svc.cluster.local:5432/marshal?sslmode=disable" : var.database_url
-  redis_url    = local.provision ? "redis://marshal-redis.${var.namespace}.svc.cluster.local:6379" : var.redis_url
 }
 
 resource "kubernetes_namespace" "marshal" {
@@ -126,50 +129,6 @@ resource "kubernetes_service" "postgres" {
     port {
       port        = 5432
       target_port = 5432
-    }
-  }
-}
-
-# ── Redis ────────────────────────────────────────────────────────────────────
-resource "kubernetes_deployment" "redis" {
-  count = local.provision ? 1 : 0
-  metadata {
-    name      = "marshal-redis"
-    namespace = kubernetes_namespace.marshal[0].metadata[0].name
-    labels    = { app = "marshal-redis" }
-  }
-  spec {
-    replicas = 1
-    selector { match_labels = { app = "marshal-redis" } }
-    template {
-      metadata { labels = { app = "marshal-redis" } }
-      spec {
-        container {
-          name  = "redis"
-          image = var.redis_image
-          port { container_port = 6379 }
-          readiness_probe {
-            exec { command = ["redis-cli", "ping"] }
-            initial_delay_seconds = 3
-            period_seconds        = 10
-          }
-        }
-      }
-    }
-  }
-}
-
-resource "kubernetes_service" "redis" {
-  count = local.provision ? 1 : 0
-  metadata {
-    name      = "marshal-redis"
-    namespace = kubernetes_namespace.marshal[0].metadata[0].name
-  }
-  spec {
-    selector = { app = "marshal-redis" }
-    port {
-      port        = 6379
-      target_port = 6379
     }
   }
 }

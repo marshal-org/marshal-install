@@ -160,6 +160,7 @@ module "marshal" {
   tls_secret_name = var.tls_secret_name
   preview_domain  = var.preview_domain
   preview_scheme  = var.preview_scheme
+  http_mode       = var.http_mode
 
   webhook_relay_enabled = var.webhook_relay_enabled
   webhook_relay_url     = var.webhook_relay_url

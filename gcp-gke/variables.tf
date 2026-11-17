@@ -677,6 +677,18 @@ variable "preview_domain" {
   default     = ""
 }
 
+variable "http_mode" {
+  description = "What plain HTTP does: \"serve\" (default) answers it like HTTPS, \"redirect\" sends it to https, \"off\" refuses it. Needs TLS (tls_mode other than \"none\", or a managed certificate) and preview_scheme = \"https\". With internal_ingress = true and ingress_mode = \"ingress\" only \"off\" works (a GKE internal Ingress cannot redirect); for a redirect there, use ingress_mode = \"gateway\"."
+  type        = string
+  default     = "serve"
+  nullable    = false
+
+  validation {
+    condition     = contains(["serve", "redirect", "off"], var.http_mode)
+    error_message = "http_mode must be \"serve\", \"redirect\" or \"off\"."
+  }
+}
+
 variable "preview_scheme" {
   description = "\"https\" or \"http\" for preview URLs."
   type        = string

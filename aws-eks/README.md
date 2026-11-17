@@ -525,6 +525,19 @@ Afterwards, `aws eks list-clusters`, `aws rds describe-db-instances` and
 `aws s3api list-buckets` in your region should show nothing of yours. A final RDS
 snapshot, if you kept one, stays until you delete it.
 
+**Check both buckets by name, even when the destroy reported success.** If the
+refresh at the start of `terraform destroy` reads a bucket as missing, Terraform
+drops it from state without a message and the destroy still ends with
+`Destroy complete!`. The bucket stays, with its data, and keeps billing. Seen
+once on the spaces bucket after an upgrade:
+
+```bash
+for b in <cluster_name>-spaces-persistence-<account_id> <cluster_name>-audit-persistence-<account_id>; do
+  aws s3api head-bucket --bucket "$b" --region <region> 2>/dev/null && echo "still there: $b"
+done
+```
+If one is still there, empty and remove it: `aws s3 rb --force s3://<name> --region <region>`.
+
 ## After the install: owner, first space, storage
 
 Three one-time steps, in this order, take a finished apply to a working space. They
@@ -588,6 +601,10 @@ twice.
 4. `terraform init -upgrade` (the lock file is not in the repository), then
    `terraform plan`. Apply only a plan that replaces nothing you did not choose;
    from 0.29 the one expected destroy is the RDS security group (see RDS above).
+   If a plan shows `registryAuth.secret.password` in clear text, that value
+   comes from the release record of an apply made by an older installer. It
+   shows once: after this apply, plans print `(sensitive value)`. Do not share
+   plan output that shows it.
 5. `terraform apply`. Roll back with `helm rollback marshal -n marshal`.
 
 ## Design references

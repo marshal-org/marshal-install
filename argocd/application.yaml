@@ -45,6 +45,9 @@ spec:
         # cache + workloadIdentity/none, NO pull secret lands in git.
         global:
           registry: europe-west1-docker.pkg.dev/acme-shared/marshal-cache/marshal
+          # Bundled Redis passwords: seed this Secret by hand first (README step 2d).
+          redisAuth:
+            existingSecret: marshal-redis-auth
         registryAuth:
           mode: workloadIdentity # or "none" for an open in-network cache
 

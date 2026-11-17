@@ -68,7 +68,8 @@ Required: `installation_jwt`, `deployment_id`, `registry_pull_token`,
 ### Datastores
 
 By default this flavor deploys a minimal in-cluster `postgres:16` (with a
-`local-path` PVC) + `redis:7` and wires their DSNs into Marshal — so a single node
+`local-path` PVC) and turns on the chart's bundled Redis (`local-path` PVC, with the
+per-user ACL passwords generated for you), wiring both into Marshal — so a single node
 is self-contained. This is fine for evaluation / small installs but Postgres has
 **no HA or backups**. For durable data, set `provision_datastores = false` and
 pass a managed `database_url` (and, if you run managed Redis, `redis_url`).
@@ -77,17 +78,27 @@ pass a managed `database_url` (and, if you run managed Redis, `redis_url`).
 > only ephemeral/reconstructible state, so it never needs a managed backend.
 > Postgres is the durable source of truth and is what you'd move to managed.
 
-> The chart's own bundled Bitnami subcharts are deliberately **not** used — their
-> Docker Hub tags were withdrawn upstream — so this flavor rolls its own pair.
+> Redis is the chart's own bundled one, same as the GKE and EKS flavors: the api
+> and gateway use a full user, and space pods a restricted `spaces` user that
+> cannot create SSH connection credentials. Postgres stays this flavor's own
+> Deployment; the chart's bundled Postgres is not used.
+>
+> Upgrading an install that ran the old `marshal-redis` Deployment: the apply
+> removes it and the chart starts the bundled Redis. Redis holds only ephemeral
+> state, so only in-flight state is lost (open event streams, WS tokens, OAuth state, pod addresses, queued
+> usage counters); clients re-create these on reconnect.
 
 ### DNS / TLS
 
 - **No real domain?** Use [sslip.io](https://sslip.io): set
   `ingress_host = "marshal.<NODE-IP-WITH-DASHES>.sslip.io"` (e.g.
-  `marshal.203-0-113-5.sslip.io`). Leave `ingress_tls = []` for HTTP.
+  `marshal.203-0-113-5.sslip.io`). HTTPS is on by default (`tls_mode =
+  "self_signed"`) with a placeholder certificate your browser will warn about.
+  For plain HTTP, set `tls_mode = "none"`.
 - **Real TLS** — install cert-manager + a `ClusterIssuer`, then set
-  `ingress_annotations = { "cert-manager.io/cluster-issuer" = "letsencrypt" }`
-  and `ingress_tls = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]`.
+  `tls_mode = "secret"` (Terraform then leaves the `marshal-tls` Secret to
+  cert-manager) and
+  `ingress_annotations = { "cert-manager.io/cluster-issuer" = "letsencrypt" }`.
   Point the host's DNS A record at the node IP.
 
 ### Registry

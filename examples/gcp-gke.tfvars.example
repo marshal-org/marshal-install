@@ -23,7 +23,7 @@ deployment_id       = "dep_ab12cd"
 registry_pull_token = "mrpt_9f3c…"
 
 # ── Product version + routing ────────────────────────────────────────────────
-chart_version = "0.33.1" # the version this installer was published for; confirm against your onboarding
+chart_version = "0.37.1" # the version this installer was published for; confirm against your onboarding
 ingress_host  = "marshal.acme.com"
 
 # ── Datastores: external Postgres + bundled Redis (recommended) ──────────────
@@ -49,6 +49,11 @@ redis_mode = "bundled"
 # create_managed_certificate = true
 # Or bring your own TLS Secret:
 # ingress_tls = [{ hosts = ["marshal.acme.com"], secretName = "marshal-tls" }]
+#
+# Plain HTTP: "serve" (default), "redirect" to https, or "off". On the default
+# internal Ingress only "off" works; ingress_mode = "gateway" can redirect.
+# Needs TLS and preview_scheme = "https".
+# http_mode = "off"
 
 # ── Registry (default: a pull-through cache in your project) ─────────────────
 # create_registry_cache = true is the default: an Artifact Registry remote repo

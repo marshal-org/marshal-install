@@ -105,11 +105,23 @@ kubectl create secret generic marshal-license -n marshal \
 # c) Datastore DSN — external Postgres (key: database-url).
 kubectl create secret generic marshal-db -n marshal \
   --from-literal=database-url="postgres://marshal:PW@HOST:5432/marshal?sslmode=require"
+
+# d) Bundled Redis passwords (charts with Redis users, marshal#2218). Only with
+#    bundledDeps.redis.enabled. Hex is URL-safe; the chart refuses anything
+#    outside A-Za-z0-9._~- . Without this Secret the chart makes its own with
+#    `lookup`, which returns nothing under ArgoCD, so the passwords would change
+#    on every sync and break Redis.
+kubectl create secret generic marshal-redis-auth -n marshal \
+  --from-literal=full-password="$(openssl rand -hex 24)" \
+  --from-literal=spaces-password="$(openssl rand -hex 24)"
 ```
+
+Then name it in the Application's values (`global.redisAuth.existingSecret:
+marshal-redis-auth`, already set in `application.yaml`).
 
 Prefer not to run `kubectl create secret` by hand? Use a **SealedSecret** (commit
 the encrypted form) or **External Secrets Operator** (sync from your cloud secret
-manager) for the same three Secrets — the point is only that they are **stable and
+manager) for the same Secrets — the point is only that they are **stable and
 not chart-generated**. If you use External Secrets, you can instead set
 `secrets.provider: externalSecrets` in the Application and let the operator populate
 `marshal-app-secrets`.
