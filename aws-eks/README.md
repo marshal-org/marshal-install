@@ -451,11 +451,14 @@ create_audit_persistence_bucket  = true   # compliance export of the session aud
 create_spaces_persistence_bucket = true   # session pause/resume snapshots
 ```
 
-**Identity.** One IAM role, `<cluster_name>-storage-role`, assumed through IRSA
-by the api's ServiceAccount (`<release>-api`, for either bucket) and the
-supervisor's (`<release>-supervisor` in `<release>-spaces`, for the spaces
-bucket only, since the supervisor does the snapshot I/O inside session pods).
-Object-level access on each enabled bucket, no keys.
+**Identity.** Two IAM roles, assumed through IRSA, no keys:
+
+- `<cluster_name>-storage-role`: the api's ServiceAccount (`<release>-api`),
+  object-level access on each enabled bucket.
+- `<cluster_name>-supervisor-storage-role`: the supervisor's
+  (`<release>-supervisor` in `<release>-spaces`), object-level access on the
+  **spaces bucket only**. The supervisor does the snapshot I/O inside session
+  pods, next to agent code, so it must never reach the audit bucket.
 
 **Turning the features on.** Creating a bucket doesn't do it. After install an
 owner or admin of each org connects it in **Settings > Space Storage** and
@@ -467,9 +470,10 @@ fields.
 **Provisioned clusters only.** The buckets and role are created only with
 `deploy_cluster = true`, because the trust policy needs the OIDC provider this
 flavor creates. On a reused cluster leave both toggles off, create the bucket
-and an IRSA role yourself, and pass the role ARN through
-`api_service_account_annotations` (and `supervisor_service_account_annotations`
-for spaces).
+and IRSA roles yourself, and pass the role ARNs through
+`api_service_account_annotations` and `supervisor_service_account_annotations`.
+Give the supervisor its own role with access to the spaces bucket only, never
+the api's role.
 
 ## Tearing down
 

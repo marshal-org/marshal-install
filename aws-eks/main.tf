@@ -124,8 +124,8 @@ locals {
 
   supervisor_service_account_annotations = merge(
     var.supervisor_service_account_annotations,
-    local.create_storage && var.create_spaces_persistence_bucket ? {
-      "eks.amazonaws.com/role-arn" = aws_iam_role.storage[0].arn
+    local.create_supervisor_storage ? {
+      "eks.amazonaws.com/role-arn" = aws_iam_role.supervisor_storage[0].arn
     } : {},
   )
 }

@@ -53,18 +53,23 @@ locals {
   audit_persistence_bucket_name  = "${var.cluster_name}-audit-persistence-${local.storage_account_id}"
   spaces_persistence_bucket_name = "${var.cluster_name}-spaces-persistence-${local.storage_account_id}"
 
-  # Subjects allowed to assume the shared storage role: the api's KSA
-  # whenever EITHER bucket is on, the supervisor's KSA only for the spaces
-  # bucket specifically — same asymmetry gcp-gke's buckets.tf documents (the
-  # supervisor does the runtime snapshot/restore blob I/O in session pods,
-  # separate namespace from the api; it never touches the audit bucket).
-  # spaces_namespace mirrors modules/marshal-install's own default
-  # derivation ("<release_name>-spaces") since this flavor doesn't override
+  # Only the api's KSA may assume the shared storage role, which reaches BOTH
+  # buckets. The supervisor gets its own role (supervisor_storage below) that
+  # reaches the spaces bucket only: it runs in session pods, next to agent
+  # code, and must never reach the audit bucket — the same split gcp-gke makes
+  # with its supervisor_storage GSA. Before this, the supervisor's KSA was a
+  # subject of the shared role, so with both buckets on, a session pod could
+  # read, write and delete audit data.
+  storage_irsa_subjects = local.create_any_storage_bucket ? ["system:serviceaccount:${var.namespace}:${var.release_name}-api"] : []
+
+  # spaces_namespace mirrors modules/marshal-install's own default derivation
+  # ("<release_name>-spaces") since this flavor doesn't override
   # var.spaces_namespace.
-  storage_irsa_subjects = concat(
-    local.create_any_storage_bucket ? ["system:serviceaccount:${var.namespace}:${var.release_name}-api"] : [],
-    var.create_spaces_persistence_bucket ? ["system:serviceaccount:${var.release_name}-spaces:${var.release_name}-supervisor"] : [],
-  )
+  supervisor_irsa_subject   = "system:serviceaccount:${var.release_name}-spaces:${var.release_name}-supervisor"
+  create_supervisor_storage = local.provision && var.create_spaces_persistence_bucket
+  # The only bucket the supervisor's policy names. A local so the tests can
+  # check it at plan time (the policy document is only read at apply).
+  supervisor_storage_bucket_arns = local.create_supervisor_storage ? [aws_s3_bucket.spaces_persistence[0].arn] : []
 }
 
 # output precondition, not `check` or a variable validation: see harbor.tf's
@@ -147,8 +152,8 @@ resource "aws_s3_bucket_public_access_block" "spaces_persistence" {
   restrict_public_buckets = true
 }
 
-# ── IRSA — one shared role for both buckets (same pattern as gcp-gke's one
-#    shared GSA), object-level access only, scoped per-bucket ──────────────
+# ── IRSA — the api's role for both buckets (same pattern as gcp-gke's shared
+#    storage GSA), object-level access only, scoped per-bucket ─────────────
 data "aws_iam_policy_document" "storage_assume_role" {
   count = local.create_storage ? 1 : 0
   statement {
@@ -212,6 +217,56 @@ data "aws_iam_policy_document" "storage_s3" {
       resources = ["${aws_s3_bucket.spaces_persistence[0].arn}/*"]
     }
   }
+}
+
+# ── IRSA — the supervisor's own role: spaces bucket only ─────────────────────
+data "aws_iam_policy_document" "supervisor_storage_assume_role" {
+  count = local.create_supervisor_storage ? 1 : 0
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = [local.oidc_provider_arn]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_provider_url}:sub"
+      values   = [local.supervisor_irsa_subject]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "${local.oidc_provider_url}:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "supervisor_storage" {
+  count              = local.create_supervisor_storage ? 1 : 0
+  name               = "${var.cluster_name}-supervisor-storage-role"
+  assume_role_policy = data.aws_iam_policy_document.supervisor_storage_assume_role[0].json
+}
+
+data "aws_iam_policy_document" "supervisor_storage_s3" {
+  count = local.create_supervisor_storage ? 1 : 0
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:ListBucket"]
+    resources = local.supervisor_storage_bucket_arns
+  }
+  statement {
+    effect    = "Allow"
+    actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+    resources = [for arn in local.supervisor_storage_bucket_arns : "${arn}/*"]
+  }
+}
+
+resource "aws_iam_role_policy" "supervisor_storage_s3" {
+  count  = local.create_supervisor_storage ? 1 : 0
+  name   = "${var.cluster_name}-supervisor-storage-s3"
+  role   = aws_iam_role.supervisor_storage[0].id
+  policy = data.aws_iam_policy_document.supervisor_storage_s3[0].json
 }
 
 resource "aws_iam_role_policy" "storage_s3" {

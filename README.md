@@ -32,6 +32,23 @@ It never changes anything without telling you first, and it will not disable a s
 make an apply pass. Everything it does is in this repository and on the pages below, so you can
 also just follow those by hand.
 
+Four more skills help once Marshal is running: `/install-health-check` (a read-only PASS, WARN
+or FAIL check of the install), `/support-bundle` (collects redacted logs and reads them with
+you), `/size-node-pools` (recommends node sizes and quotas from your cluster) and
+`/add-node-pool` (moves spaces to new nodes without stopping them; you run the apply).
+
+## Latest skills for your agent
+
+Connect your agent to `https://docs.marshal.codes/mcp` to get the latest version of these
+skills, plus search over the Marshal docs. No account is needed:
+
+```
+claude mcp add --transport http marshal-docs https://docs.marshal.codes/mcp
+```
+
+The skills in this repository are the same ones, as of this release. Scripts they ask you to
+run always come from your checkout of this repository.
+
 ## Start here
 
 **The install guides live at [docs.marshal.codes](https://docs.marshal.codes/installing/prerequisites).**
@@ -97,7 +114,7 @@ all gitignored), so switching versions never touches them and never asks you
 to merge anything.
 
 ```bash
-git clone --branch v0.37.1 https://github.com/marshal-org/marshal-install.git
+git clone --branch v0.40.0 https://github.com/marshal-org/marshal-install.git
 cd marshal-install/aws-eks                      # or gcp-gke, or single-node-k3s
 
 cp ../examples/aws-eks.tfvars.example terraform.tfvars
@@ -180,4 +197,4 @@ Marshal product it installs. See [`NOTICE`](NOTICE).
 
 ---
 
-Generated for Marshal chart version `0.37.1`, published as `v0.37.1`.
+Generated for Marshal chart version `0.40.0`, published as `v0.40.0`.

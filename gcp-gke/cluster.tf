@@ -79,6 +79,27 @@ variable "create_nat" {
   default     = true
 }
 
+variable "nat_static_ip" {
+  description = <<-EOT
+    Pin Cloud NAT egress to a reserved static external IP (default false = Google auto-allocates and may change it
+    when the NAT is recreated or scaled). Set true when a third party must allowlist this install's outbound address;
+    the address is the `nat_egress_ip` output. Needs create_nat = true. Turning it on for an existing install
+    switches egress to the NEW reserved IP (the old auto IP is released) and briefly resets in-flight connections.
+  EOT
+  type        = bool
+  default     = false
+}
+
+resource "google_compute_address" "nat" {
+  count        = local.provision && var.create_nat && var.nat_static_ip ? 1 : 0
+  name         = "${var.cluster_name}-nat-ip"
+  project      = var.project_id
+  region       = local.region
+  address_type = "EXTERNAL"
+
+  depends_on = [google_project_service.required]
+}
+
 resource "google_compute_router" "router" {
   count   = local.provision && var.create_nat ? 1 : 0
   name    = "${var.cluster_name}-router"
@@ -95,7 +116,8 @@ resource "google_compute_router_nat" "nat" {
   project                            = var.project_id
   region                             = local.region
   router                             = google_compute_router.router[0].name
-  nat_ip_allocate_option             = "AUTO_ONLY"
+  nat_ip_allocate_option             = var.nat_static_ip ? "MANUAL_ONLY" : "AUTO_ONLY"
+  nat_ips                            = var.nat_static_ip ? google_compute_address.nat[*].self_link : null
   source_subnetwork_ip_ranges_to_nat = "ALL_SUBNETWORKS_ALL_IP_RANGES"
 
   log_config {

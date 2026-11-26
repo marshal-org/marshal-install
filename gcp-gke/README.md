@@ -608,7 +608,9 @@ Terraform creates, all in one apply, then installs onto it:
   endpoint if you administer from outside the VPC.
 - **Cloud Router + Cloud NAT** (`create_nat`, default on) — REQUIRED so private
   nodes can egress to pull images from `registry.marshal.codes` and reach the
-  license/token hosts. Without it the install fails on image pulls.
+  license/token hosts. Without it the install fails on image pulls. Egress IPs are
+  Google-allocated by default and can change; set `nat_static_ip = true` to pin
+  them to one reserved address (output `nat_egress_ip`) for third-party allowlists.
 - **Networking** — `create_network = true` (default) makes a dedicated VPC +
   subnet with secondary ranges for pods/services; or `create_network = false` and
   set `network`/`subnetwork`/`pods_range_name`/`services_range_name` to reuse

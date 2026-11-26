@@ -11,6 +11,11 @@ output "ingress_ip" {
   value       = local.ingress_ip_address
 }
 
+output "nat_egress_ip" {
+  description = "The static public IP all private-node egress leaves through, when nat_static_ip = true (give this to anyone who allowlists the install's outbound traffic). null otherwise."
+  value       = one(google_compute_address.nat[*].address)
+}
+
 output "kubeconfig_command" {
   description = "The command that points kubectl at this cluster. Includes --dns-endpoint when the providers use the DNS endpoint (deploy_cluster and dns_endpoint_enabled)."
   value       = local.kubeconfig_command

@@ -330,3 +330,54 @@ capabilities:
     enable: "http_mode = \"redirect\"   # or \"off\""
     disable: "http_mode = \"serve\""
     needs: "a chart release with ingress.http (marshal#2354); on an older chart only aws-eks honours it. TLS (tls_mode other than none) and preview_scheme = \"https\"."
+
+  - id: eks-supervisor-storage-role
+    since: unreleased
+    flavors: [aws-eks]
+    variables: [supervisor_service_account_annotations]
+    kind: default-changed
+    default: "the supervisor assumes its own IAM role, <cluster_name>-supervisor-storage-role, with object access on the spaces bucket only"
+    previous: "the supervisor shared <cluster_name>-storage-role with the api, which reaches both the spaces and the audit bucket"
+    when: before
+    disruptive: false
+    effect_on_existing: >-
+      Applies when this installer created the spaces bucket (deploy_cluster = true and
+      create_spaces_persistence_bucket = true). The plan adds the new role and its
+      policy, narrows the old role's trust to the api's ServiceAccount only, and
+      re-annotates the supervisor's ServiceAccount with the new role (2 to add, 2 to
+      change, 0 to destroy). Space snapshots saved before the upgrade restore under
+      the new role. Measured on an EKS upgrade from installer v0.37.1 to 0.40.0: the
+      helm upgrade took about 1 minute, a parked space resumed with its files, and the
+      supervisor was refused on the audit bucket. On a reused cluster (you pass your
+      own IRSA roles through the annotations) nothing changes by itself: give the
+      supervisor its own role with access to the spaces bucket only, never the api's.
+    question: >-
+      The upgrade gives the supervisor (which runs next to agent code in session
+      pods) its own storage role that can reach only the spaces bucket, so it can no
+      longer touch audit data. Running and parked spaces keep their data. Go ahead?
+    recommend: "Yes. It closes a path from session pods to the audit bucket, and the measured upgrade kept every space."
+    enable: "nothing to set (the installer creates the role when it created the spaces bucket)"
+    disable: "not available: the supervisor must not share the api's role. On a reused cluster set supervisor_service_account_annotations to your own spaces-only role"
+    needs: ""
+
+  - id: gke-nat-static-ip
+    since: unreleased
+    flavors: [gcp-gke]
+    variables: [nat_static_ip]
+    kind: new-feature
+    default: "false (Google picks the NAT egress address and may change it)"
+    when: after
+    disruptive: false
+    effect_on_existing: >-
+      Nothing while it stays false. Turning it on reserves a static external IP and
+      switches Cloud NAT egress to it: the old automatic address is released and
+      in-flight outbound connections reset briefly. The address is the nat_egress_ip
+      output.
+    question: >-
+      Do you need this install's outbound traffic to come from one fixed IP address,
+      for example so a third party (GitHub Enterprise, a database, an API) can
+      allowlist it?
+    recommend: "Only if something you connect to allowlists by IP. Otherwise leave it off."
+    enable: "nat_static_ip = true   # needs create_nat = true"
+    disable: "nat_static_ip = false"
+    needs: "create_nat = true"
