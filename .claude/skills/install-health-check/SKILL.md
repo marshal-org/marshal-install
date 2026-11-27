@@ -49,7 +49,7 @@ broken.
 | migration job | The latest migrate job has not succeeded. | `kubectl logs job/<name> -n marshal`. Do not roll the api until it passes. |
 | ingress address | The ingress has no address. On EKS a missing `kubernetes.io/role/internal-elb` subnet tag fails **silently**. | Check the subnet tags, then the load balancer controller logs. |
 | service endpoints | A Service has no ready pod behind it. | Same as the deployment check. |
-| PVCs Bound | A PVC is not Bound. | `kubectl describe pvc <name>`: the StorageClass, the zone, or the EBS CSI or PD driver. |
+| PVCs Bound | A PVC a pod is waiting on is not Bound, or a PVC is Lost. A Pending PVC that no pod uses is normal (it binds when its space starts) and is reported as waiting for first use. | `kubectl describe pvc <name>`: the StorageClass, the zone, or the EBS CSI or PD driver. |
 | node requests | A spaces node is above 85% requested on CPU, memory or disk. | The `size-node-pools` skill. Disk is the usual one. |
 | TLS cert | Expires in under 21 days (WARN) or 7 (FAIL), or is unreadable. A certificate you installed by hand is **not** renewed automatically. | Renew it and replace the secret's contents. |
 

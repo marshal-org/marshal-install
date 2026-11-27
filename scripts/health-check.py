@@ -81,7 +81,10 @@ if deps is not None:
 # 3. Isolation: control-plane pods only on control-plane nodes (when such a pool exists)
 if nodes is not None and pods is not None:
     pool = {n["metadata"]["name"]: n["metadata"].get("labels", {}).get("workload", "") for n in nodes}
-    if "control-plane" not in pool.values():
+    if len(nodes) == 1:
+        # Single-node k3s: one node runs everything by design.
+        out("PASS", "control-plane isolation", "single node: control plane and spaces share it by design")
+    elif "control-plane" not in pool.values():
         out("WARN", "control-plane isolation", "no node labelled workload=control-plane: control-plane pods share nodes with spaces")
     else:
         spill = [p["metadata"]["name"] + "@" + p["spec"]["nodeName"] for p in pods
@@ -144,9 +147,33 @@ if eps is not None:
     out("FAIL" if bad else "PASS", "service endpoints (api/gateway/web/marketplace)", "no ready addresses: " + ", ".join(bad) if bad else "")
 
 # 10. PVCs bound
+# A PVC that is Pending with no pod using it is normal: the default storage
+# classes on GKE, EKS and k3s bind on first use (WaitForFirstConsumer), and a
+# stopped space keeps its home volume unbound until it starts again. Only a
+# PVC a pod is waiting on, or a Lost one, is a failure.
 if pvcs is not None:
-    bad = [f"{p['metadata']['namespace']}/{p['metadata']['name']}" for p in pvcs if p["status"].get("phase") != "Bound"]
-    out("FAIL" if bad else "PASS", f"PVCs Bound ({len(pvcs)})", "not Bound: " + ", ".join(bad[:5]) if bad else "")
+    used = set()
+    for p in pods or []:
+        for v in p["spec"].get("volumes") or []:
+            c = (v.get("persistentVolumeClaim") or {}).get("claimName")
+            if c:
+                used.add((p["metadata"]["namespace"], c))
+    bad, idle = [], 0
+    for p in pvcs:
+        phase = p["status"].get("phase")
+        key = (p["metadata"]["namespace"], p["metadata"]["name"])
+        if phase == "Bound":
+            continue
+        # Only when the pod list was read: without it, no PVC can be shown unused.
+        if phase == "Pending" and pods is not None and key not in used:
+            idle += 1
+            continue
+        bad.append(f"{key[0]}/{key[1]} ({phase})")
+    note = f"{idle} waiting for first use (stopped spaces)" if idle else ""
+    if bad:
+        out("FAIL", f"PVCs Bound ({len(pvcs)})", "not Bound: " + ", ".join(bad[:5]))
+    else:
+        out("PASS", f"PVCs Bound ({len(pvcs)})", note)
 
 # 11. Spaces nodes: requested CPU / memory / disk
 if nodes is not None and pods is not None:

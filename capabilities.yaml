@@ -332,7 +332,7 @@ capabilities:
     needs: "a chart release with ingress.http (marshal#2354); on an older chart only aws-eks honours it. TLS (tls_mode other than none) and preview_scheme = \"https\"."
 
   - id: eks-supervisor-storage-role
-    since: unreleased
+    since: 0.40.0
     flavors: [aws-eks]
     variables: [supervisor_service_account_annotations]
     kind: default-changed
@@ -361,7 +361,7 @@ capabilities:
     needs: ""
 
   - id: gke-nat-static-ip
-    since: unreleased
+    since: 0.40.0
     flavors: [gcp-gke]
     variables: [nat_static_ip]
     kind: new-feature

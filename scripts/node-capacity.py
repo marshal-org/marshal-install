@@ -77,7 +77,8 @@ def main():
         for cn, (c, m, d) in CLASSES.items():
             fits.append(f"{cn} {max(0, int(min(free[0] / c, free[1] / (m * GiB), free[2] / (d * GiB))))}")
         print("  fits more    " + ", ".join(fits))
-        if cp_pods and pool != "control-plane":
+        # One node (single-node k3s) runs everything by design: nothing to flag.
+        if cp_pods and pool != "control-plane" and len(nodes["items"]) > 1:
             flags.append(f"{name}: {len(cp_pods)} control-plane pod(s) on a non-control-plane node "
                          f"({use['control-plane'][0]:.2f} vCPU requested). taint_control_plane_pool is off, or the "
                          "pods predate the taint.")

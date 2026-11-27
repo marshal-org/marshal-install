@@ -1,6 +1,6 @@
 ---
 name: add-node-pool
-description: Move your Marshal install's spaces to a different node size or disk without stopping them, by adding a NEW node pool (GKE) or node group (EKS) beside the old one, cordoning the old one, and removing it once empty. Prepares the terraform.tfvars change, the commands and the message to your team; you run terraform apply yourself. Use whenever you want to change machine type, instance type or boot disk, or say "resize the nodes". Never edit the existing pool in place: that replaces it and stops every space on it.
+description: "Move your Marshal install's spaces to a different node size or disk without stopping them, by adding a NEW node pool (GKE) or node group (EKS) beside the old one, cordoning the old one, and removing it once empty. Prepares the terraform.tfvars change, the commands and the message to your team; you run terraform apply yourself. Use whenever you want to change machine type, instance type or boot disk, or say \"resize the nodes\". Never edit the existing pool in place: that replaces it and stops every space on it."
 ---
 
 # Add a node pool (never replace one)
